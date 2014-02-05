@@ -120,7 +120,8 @@ static void show_syncpts(struct nvhost_master *m, struct output *o)
 static void show_all(struct nvhost_master *m, struct output *o,
 		     int locked_id)
 {
-	nvhost_module_busy(m->dev);
+	if (nvhost_module_busy(m->dev))
+		return;
 
 	nvhost_get_chip_ops()->debug.show_mlocks(m, o);
 	show_syncpts(m, o);
@@ -134,7 +135,8 @@ static void show_all(struct nvhost_master *m, struct output *o,
 static void show_all_no_fifo(struct nvhost_master *m, struct output *o,
 			     int locked_id)
 {
-	nvhost_module_busy(m->dev);
+	if (nvhost_module_busy(m->dev))
+		return;
 
 	nvhost_get_chip_ops()->debug.show_mlocks(m, o);
 	show_syncpts(m, o);
