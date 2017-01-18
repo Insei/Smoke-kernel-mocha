@@ -192,7 +192,7 @@ DECLARE_EVENT_CLASS(debug_msg,
 	),
 
 	TP_printk("%s", __entry->msg)
-);
+);1
 
 DEFINE_EVENT(debug_msg, hcd_msg_evt,
 	TP_PROTO(char *fmt, va_list arg),
@@ -213,7 +213,7 @@ DEFINE_EVENT(debug_msg, info_msg_evt,
 #endif /*_OZEVENTTRACE_H*/
 
 #undef TRACE_INCLUDE_PATH
-#define TRACE_INCLUDE_PATH .
+#define TRACE_INCLUDE_PATH ../../drivers/staging/ozwpan/
 #undef TRACE_INCLUDE_FILE
 #define TRACE_INCLUDE_FILE ozeventtrace
 #include <trace/define_trace.h>
