@@ -192,7 +192,7 @@ DECLARE_EVENT_CLASS(debug_msg,
 	),
 
 	TP_printk("%s", __entry->msg)
-);1
+);
 
 DEFINE_EVENT(debug_msg, hcd_msg_evt,
 	TP_PROTO(char *fmt, va_list arg),
