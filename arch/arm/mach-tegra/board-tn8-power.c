@@ -147,7 +147,7 @@ int __init tn8_edp_init(void)
 	tegra_init_cpu_edp_limits(regulator_mA);
 
 	/* gpu maximum current */
-	regulator_mA = 11200;
+	regulator_mA = 12000;
 	pr_info("%s: GPU regulator %d mA\n", __func__, regulator_mA);
 
 	tegra_init_gpu_edp_limits(regulator_mA);
