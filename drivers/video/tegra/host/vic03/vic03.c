@@ -3,7 +3,7 @@
  *
  * Tegra VIC03 Module Support
  *
- * Copyright (c) 2011-2013, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2011-2014, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -23,10 +23,10 @@
 #include <linux/delay.h>	/* for udelay */
 #include <linux/export.h>
 #include <linux/scatterlist.h>
-#include <linux/nvmap.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
+#include <linux/dma-mapping.h>
 #include <linux/tegra-powergate.h>
 #include <linux/tegra-soc.h>
 
@@ -282,6 +282,27 @@ static int vic03_read_ucode(struct platform_device *dev, const char *fw_name)
 	return err;
 }
 
+static int vic03_wait_mem_scrubbing(struct platform_device *dev)
+{
+	int retries = VIC_IDLE_TIMEOUT_DEFAULT / VIC_IDLE_CHECK_PERIOD;
+	nvhost_dbg_fn("");
+
+	do {
+		u32 w = host1x_readl(dev, flcn_dmactl_r()) &
+			(flcn_dmactl_dmem_scrubbing_m() |
+			 flcn_dmactl_imem_scrubbing_m());
+
+		if (!w) {
+			nvhost_dbg_fn("done");
+			return 0;
+		}
+		udelay(VIC_IDLE_CHECK_PERIOD);
+	} while (--retries || !tegra_platform_is_silicon());
+
+	nvhost_err(&dev->dev, "Falcon mem scrubbing timeout");
+	return -ETIMEDOUT;
+}
+
 static int vic03_boot(struct platform_device *pdev)
 {
 	struct vic03 *v = get_vic03(pdev);
@@ -295,6 +316,10 @@ static int vic03_boot(struct platform_device *pdev)
 
 	if (v->is_booted)
 		return 0;
+
+	err = vic03_wait_mem_scrubbing(pdev);
+	if (err)
+		return err;
 
 	host1x_writel(pdev, flcn_dmactl_r(), 0);
 
@@ -524,7 +549,7 @@ static void ctxvic03_restore_push(struct nvhost_hwctx *nctx,
 	nvhost_cdma_push(cdma,
 		nvhost_opcode_setclass(NV_GRAPHICS_VIC_CLASS_ID, 0, 0),
 		NVHOST_OPCODE_NOOP);
-	_nvhost_cdma_push_gather(cdma,
+	nvhost_cdma_push_gather(cdma,
 		ctx->cpuva,
 		ctx->iova,
 		0,
@@ -631,14 +656,6 @@ static int vic03_probe(struct platform_device *dev)
 	if (err) {
 		nvhost_dbg_fn("failed to init client device for %s",
 			      dev->name);
-		pm_runtime_put(&dev->dev);
-		return err;
-	}
-
-	err = nvhost_as_init_device(dev);
-	if (err) {
-		nvhost_dbg_fn("failed to init client address space"
-			      " device for %s", dev->name);
 		pm_runtime_put(&dev->dev);
 		return err;
 	}

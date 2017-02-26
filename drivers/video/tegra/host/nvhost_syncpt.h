@@ -126,12 +126,13 @@ void nvhost_syncpt_save(struct nvhost_syncpt *sp);
 void nvhost_syncpt_reset(struct nvhost_syncpt *sp);
 void nvhost_syncpt_reset_client(struct platform_device *pdev);
 
+int nvhost_syncpt_read_check(struct nvhost_syncpt *sp, u32 id, u32 *val);
 u32 nvhost_syncpt_read(struct nvhost_syncpt *sp, u32 id);
 u32 nvhost_syncpt_read_wait_base(struct nvhost_syncpt *sp, u32 id);
 void nvhost_syncpt_cpu_set_wait_base(struct platform_device *pdev, u32 id,
 					u32 val);
 
-void nvhost_syncpt_incr(struct nvhost_syncpt *sp, u32 id);
+int nvhost_syncpt_incr(struct nvhost_syncpt *sp, u32 id);
 
 int nvhost_syncpt_wait_timeout(struct nvhost_syncpt *sp, u32 id, u32 thresh,
 			u32 timeout, u32 *value, struct timespec *ts,

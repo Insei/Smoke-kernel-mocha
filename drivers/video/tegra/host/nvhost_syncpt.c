@@ -4,7 +4,6 @@
  * Tegra Graphics Host Syncpoints
  *
  * Copyright (c) 2010-2014, NVIDIA CORPORATION. All rights reserved.
- * Copyright (C) 2016 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -133,13 +132,33 @@ u32 nvhost_syncpt_update_min(struct nvhost_syncpt *sp, u32 id)
 	return val;
 }
 
+
+/**
+ * Return current syncpoint value on success
+ */
+int nvhost_syncpt_read_check(struct nvhost_syncpt *sp, u32 id, u32 *val)
+{
+	if (nvhost_module_busy(syncpt_to_dev(sp)->dev))
+		return -EINVAL;
+
+	*val = syncpt_op().update_min(sp, id);
+	nvhost_module_idle(syncpt_to_dev(sp)->dev);
+
+	return 0;
+}
+
 /**
  * Get the current syncpoint value
  */
 u32 nvhost_syncpt_read(struct nvhost_syncpt *sp, u32 id)
 {
-	u32 val;
-	nvhost_module_busy(syncpt_to_dev(sp)->dev);
+	u32 val = 0xffffffff;
+	int err;
+
+	err = nvhost_module_busy(syncpt_to_dev(sp)->dev);
+	if (err)
+		return val;
+
 	val = syncpt_op().update_min(sp, id);
 	nvhost_module_idle(syncpt_to_dev(sp)->dev);
 	return val;
@@ -150,8 +169,13 @@ u32 nvhost_syncpt_read(struct nvhost_syncpt *sp, u32 id)
  */
 u32 nvhost_syncpt_read_wait_base(struct nvhost_syncpt *sp, u32 id)
 {
-	u32 val;
-	nvhost_module_busy(syncpt_to_dev(sp)->dev);
+	u32 val = 0xffffffff;
+	int err;
+
+	err = nvhost_module_busy(syncpt_to_dev(sp)->dev);
+	if (err)
+		return val;
+
 	syncpt_op().read_wait_base(sp, id);
 	val = sp->base_val[id];
 	nvhost_module_idle(syncpt_to_dev(sp)->dev);
@@ -170,13 +194,20 @@ void nvhost_syncpt_cpu_incr(struct nvhost_syncpt *sp, u32 id)
 /**
  * Increment syncpoint value from cpu, updating cache
  */
-void nvhost_syncpt_incr(struct nvhost_syncpt *sp, u32 id)
+int nvhost_syncpt_incr(struct nvhost_syncpt *sp, u32 id)
 {
+	int err;
+
+	err = nvhost_module_busy(syncpt_to_dev(sp)->dev);
+	if (err)
+		return err;
+
 	if (nvhost_syncpt_client_managed(sp, id))
 		nvhost_syncpt_incr_max(sp, id, 1);
-	nvhost_module_busy(syncpt_to_dev(sp)->dev);
 	nvhost_syncpt_cpu_incr(sp, id);
 	nvhost_module_idle(syncpt_to_dev(sp)->dev);
+
+	return 0;
 }
 
 /**
@@ -203,7 +234,7 @@ int nvhost_syncpt_wait_timeout(struct nvhost_syncpt *sp, u32 id,
 	void *ref;
 	void *waiter;
 	int err = 0, check_count = 0, low_timeout = 0;
-	u32 val, old_val, new_val;
+	u32 val;
 
 	if (value)
 		*value = 0;
@@ -218,7 +249,9 @@ int nvhost_syncpt_wait_timeout(struct nvhost_syncpt *sp, u32 id,
 	}
 
 	/* keep host alive */
-	nvhost_module_busy(syncpt_to_dev(sp)->dev);
+	err = nvhost_module_busy(syncpt_to_dev(sp)->dev);
+	if (err)
+		return err;
 
 	/* try to read from register */
 	val = syncpt_op().update_min(sp, id);
@@ -234,8 +267,6 @@ int nvhost_syncpt_wait_timeout(struct nvhost_syncpt *sp, u32 id,
 		err = -EAGAIN;
 		goto done;
 	}
-
-	old_val = val;
 
 	/* schedule a wakeup when the syncpoint value is reached */
 	waiter = nvhost_intr_alloc_waiter();
@@ -290,22 +321,11 @@ int nvhost_syncpt_wait_timeout(struct nvhost_syncpt *sp, u32 id,
 		if (timeout != NVHOST_NO_TIMEOUT)
 			timeout -= check;
 		if (timeout && check_count <= MAX_STUCK_CHECK_COUNT) {
-			new_val = syncpt_op().update_min(sp, id);
-			if (old_val == new_val) {
-				dev_warn(&syncpt_to_dev(sp)->dev->dev,
-					"%s: syncpoint id %d (%s) stuck waiting %d, timeout=%d\n",
-					 current->comm, id,
-					 syncpt_op().name(sp, id),
-					 thresh, timeout);
-				syncpt_op().debug(sp);
-			} else {
-				old_val = new_val;
-				dev_warn(&syncpt_to_dev(sp)->dev->dev,
-					"%s: syncpoint id %d (%s) progressing slowly %d, timeout=%d\n",
-					 current->comm, id,
-					 syncpt_op().name(sp, id),
-					 thresh, timeout);
-			}
+			dev_warn(&syncpt_to_dev(sp)->dev->dev,
+				"%s: syncpoint id %d (%s) stuck waiting %d, timeout=%d\n",
+				 current->comm, id, syncpt_op().name(sp, id),
+				 thresh, timeout);
+			syncpt_op().debug(sp);
 			if (check_count == MAX_STUCK_CHECK_COUNT) {
 				if (low_timeout) {
 					dev_warn(&syncpt_to_dev(sp)->dev->dev,
@@ -510,9 +530,13 @@ void nvhost_syncpt_debug(struct nvhost_syncpt *sp)
 int nvhost_mutex_try_lock(struct nvhost_syncpt *sp, int idx)
 {
 	struct nvhost_master *host = syncpt_to_dev(sp);
+	int err;
 	u32 reg;
 
-	nvhost_module_busy(host->dev);
+	err = nvhost_module_busy(host->dev);
+	if (err)
+		return err;
+
 	reg = syncpt_op().mutex_try_lock(sp, idx);
 	if (reg) {
 		nvhost_module_idle(host->dev);
@@ -845,23 +869,23 @@ void nvhost_syncpt_cpu_set_wait_base(struct platform_device *pdev, u32 id,
 	wmb();
 }
 
-u32 nvhost_syncpt_read_ext(struct platform_device *dev, u32 id)
+int nvhost_syncpt_read_ext_check(struct platform_device *dev, u32 id, u32 *val)
 {
 	struct platform_device *pdev;
 	struct nvhost_syncpt *sp;
 
 	if (!nvhost_get_parent(dev)) {
 		dev_err(&dev->dev, "Read called with wrong dev\n");
-		return 0;
+		return -EINVAL;
 	}
 
 	/* get the parent */
 	pdev = to_platform_device(dev->dev.parent);
 	sp = &(nvhost_get_host(pdev)->syncpt);
 
-	return nvhost_syncpt_read(sp, id);
+	return nvhost_syncpt_read_check(sp, id, val);
 }
-EXPORT_SYMBOL(nvhost_syncpt_read_ext);
+EXPORT_SYMBOL(nvhost_syncpt_read_ext_check);
 
 int nvhost_syncpt_wait_timeout_ext(struct platform_device *dev, u32 id,
 	u32 thresh, u32 timeout, u32 *value, struct timespec *ts)

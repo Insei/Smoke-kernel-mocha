@@ -27,6 +27,7 @@
 struct nvhost_channel;
 struct nvhost_cdma;
 struct mem_mgr;
+struct dma_buf;
 struct nvhost_dbg_session;
 
 struct nvhost_hwctx {
@@ -38,12 +39,6 @@ struct nvhost_hwctx {
 	u32 timeout_ms_max;
 	bool timeout_debug_dump;
 
-	struct mem_mgr *memmgr;
-
-	struct mem_handle *error_notifier_ref;
-	struct nvhost_notification *error_notifier;
-	void *error_notifier_va;
-
 	u32 save_incrs;
 	u32 save_slots;
 
@@ -52,7 +47,6 @@ struct nvhost_hwctx {
 
 	struct list_head as_share_bound_list_node;
 	struct nvhost_as_share *as_share;
-	struct nvhost_dbg_session *dbg_session;
 };
 
 struct nvhost_hwctx_handler {

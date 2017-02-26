@@ -1,8 +1,7 @@
 /*
  * dma_buf exporter for nvmap
  *
- * Copyright (c) 2012-2013, NVIDIA CORPORATION.  All rights reserved.
- * Copyright (C) 2016 XiaoMi, Inc.
+ * Copyright (c) 2012-2014, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -80,6 +79,7 @@ struct nvmap_handle_sgt {
 static DEFINE_MUTEX(nvmap_stashed_maps_lock);
 static LIST_HEAD(nvmap_stashed_maps);
 static struct kmem_cache *handle_sgt_cache;
+static struct dma_buf_ops nvmap_dma_buf_ops;
 
 /*
  * Initialize a kmem cache for allocating nvmap_handle_sgt's.
@@ -207,6 +207,7 @@ static void __nvmap_dmabuf_free_sgt_locked(struct nvmap_handle_sgt *nvmap_sgt)
 	list_del(&nvmap_sgt->maps_entry);
 
 	if (info->handle->heap_pgalloc) {
+		dma_set_attr(DMA_ATTR_SKIP_IOVA_GAP, &attrs);
 		dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
 		dma_unmap_sg_attrs(nvmap_sgt->dev,
 				   nvmap_sgt->sgt->sgl, nvmap_sgt->sgt->nents,
@@ -351,8 +352,13 @@ static struct sg_table *nvmap_dmabuf_map_dma_buf(
 
 	trace_nvmap_dmabuf_map_dma_buf(attach->dmabuf, attach->dev);
 
+	nvmap_lru_reset(info->handle);
 	mutex_lock(&info->maps_lock);
+
+	mutex_lock(&info->handle->lock);
 	atomic_inc(&info->handle->pin);
+	mutex_unlock(&info->handle->lock);
+
 	sgt = __nvmap_dmabuf_get_sgt_locked(attach, dir);
 	if (sgt)
 		goto cache_hit;
@@ -365,6 +371,7 @@ static struct sg_table *nvmap_dmabuf_map_dma_buf(
 	}
 
 	if (info->handle->heap_pgalloc && info->handle->alloc) {
+		dma_set_attr(DMA_ATTR_SKIP_IOVA_GAP, &attrs);
 		dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
 		ents = dma_map_sg_attrs(attach->dev, sgt->sgl,
 					sgt->nents, dir, &attrs);
@@ -373,12 +380,7 @@ static struct sg_table *nvmap_dmabuf_map_dma_buf(
 			goto err_map;
 		}
 		BUG_ON(ents != 1);
-	} else if (info->handle->alloc) {
-		/* carveout has linear map setup. */
-		mutex_lock(&info->handle->lock);
-		sg_dma_address(sgt->sgl) = info->handle->carveout->base;
-		mutex_unlock(&info->handle->lock);
-	} else {
+	} else if (!info->handle->alloc) {
 		goto err_map;
 	}
 
@@ -432,6 +434,8 @@ static void nvmap_dmabuf_release(struct dma_buf *dmabuf)
 				   info->handle->owner->name : "unknown",
 				   info->handle,
 				   dmabuf);
+	BUG_ON(dmabuf != info->handle->dmabuf);
+	info->handle->dmabuf = NULL;
 
 	mutex_lock(&info->maps_lock);
 	while (!list_empty(&info->maps)) {
@@ -443,8 +447,7 @@ static void nvmap_dmabuf_release(struct dma_buf *dmabuf)
 	}
 	mutex_unlock(&info->maps_lock);
 
-	dma_buf_detach(info->handle->dmabuf, info->handle->attachment);
-	info->handle->dmabuf = NULL;
+	dma_buf_detach(dmabuf, info->handle->attachment);
 	nvmap_handle_put(info->handle);
 	kfree(info);
 }
@@ -457,7 +460,7 @@ static int nvmap_dmabuf_begin_cpu_access(struct dma_buf *dmabuf,
 
 	trace_nvmap_dmabuf_begin_cpu_access(dmabuf, start, len);
 	return __nvmap_do_cache_maint(NULL, info->handle, start, start + len,
-				      NVMAP_CACHE_OP_INV, 1);
+				      NVMAP_CACHE_OP_WB_INV, false);
 }
 
 static void nvmap_dmabuf_end_cpu_access(struct dma_buf *dmabuf,
@@ -468,7 +471,7 @@ static void nvmap_dmabuf_end_cpu_access(struct dma_buf *dmabuf,
 
 	trace_nvmap_dmabuf_end_cpu_access(dmabuf, start, len);
 	__nvmap_do_cache_maint(NULL, info->handle, start, start + len,
-				   NVMAP_CACHE_OP_WB_INV, 1);
+				   NVMAP_CACHE_OP_WB, false);
 
 }
 
@@ -521,6 +524,29 @@ static void nvmap_dmabuf_vunmap(struct dma_buf *dmabuf, void *vaddr)
 	__nvmap_munmap(info->handle, vaddr);
 }
 
+static int nvmap_dmabuf_set_private(struct dma_buf *dmabuf,
+		struct device *dev, void *priv, void (*delete)(void *priv))
+{
+	struct nvmap_handle_info *info;
+
+	info = dmabuf->priv;
+	info->handle->nvhost_priv = priv;
+	info->handle->nvhost_priv_delete = delete;
+
+	return 0;
+}
+
+static void *nvmap_dmabuf_get_private(struct dma_buf *dmabuf,
+		struct device *dev)
+{
+	void *priv;
+	struct nvmap_handle_info *info;
+
+	info = dmabuf->priv;
+	priv = info->handle->nvhost_priv;
+	return priv;
+}
+
 static struct dma_buf_ops nvmap_dma_buf_ops = {
 	.attach		= nvmap_dmabuf_attach,
 	.detach		= nvmap_dmabuf_detach,
@@ -535,6 +561,8 @@ static struct dma_buf_ops nvmap_dma_buf_ops = {
 	.mmap		= nvmap_dmabuf_mmap,
 	.vmap		= nvmap_dmabuf_vmap,
 	.vunmap		= nvmap_dmabuf_vunmap,
+	.set_drvdata	= nvmap_dmabuf_set_private,
+	.get_drvdata	= nvmap_dmabuf_get_private,
 };
 
 /*
@@ -593,12 +621,12 @@ int __nvmap_dmabuf_fd(struct dma_buf *dmabuf, int flags)
 	return fd;
 }
 
-int nvmap_get_dmabuf_fd(struct nvmap_client *client, ulong id)
+int nvmap_get_dmabuf_fd(struct nvmap_client *client, struct nvmap_handle *h)
 {
 	int fd;
 	struct dma_buf *dmabuf;
 
-	dmabuf = __nvmap_dmabuf_export(client, id);
+	dmabuf = __nvmap_dmabuf_export(client, h);
 	if (IS_ERR(dmabuf))
 		return PTR_ERR(dmabuf);
 	fd = __nvmap_dmabuf_fd(dmabuf, O_CLOEXEC);
@@ -612,12 +640,11 @@ err_out:
 }
 
 struct dma_buf *__nvmap_dmabuf_export(struct nvmap_client *client,
-				 unsigned long id)
+				 struct nvmap_handle *handle)
 {
-	struct nvmap_handle *handle;
 	struct dma_buf *buf;
 
-	handle = nvmap_get_handle_id(client, id);
+	handle = nvmap_handle_get(handle);
 	if (!handle)
 		return ERR_PTR(-EINVAL);
 	buf = handle->dmabuf;
@@ -638,26 +665,7 @@ struct dma_buf *__nvmap_dmabuf_export(struct nvmap_client *client,
 EXPORT_SYMBOL(__nvmap_dmabuf_export);
 
 /*
- * Increments ref count on the dma_buf. You are reponsbile for calling
- * dma_buf_put() on the returned dma_buf object.
- */
-struct dma_buf *nvmap_dmabuf_export(struct nvmap_client *client,
-				 unsigned long user_id)
-{
-	struct dma_buf *dmabuf;
-	ulong handle;
-
-	handle = unmarshal_user_id(user_id);
-	dmabuf = __nvmap_dmabuf_export(client, handle);
-	if (handle)
-		nvmap_handle_put((struct nvmap_handle *)handle);
-
-	return dmabuf;
-}
-
-/*
- * Similar to nvmap_dmabuf_export() only use a ref to get the buf instead of a
- * user_id. You must dma_buf_put() the dma_buf object when you are done with
+ * You must dma_buf_put() the dma_buf object when you are done with
  * it.
  */
 struct dma_buf *__nvmap_dmabuf_export_from_ref(struct nvmap_handle_ref *ref)
@@ -678,42 +686,43 @@ struct dma_buf *__nvmap_dmabuf_export_from_ref(struct nvmap_handle_ref *ref)
  * returned by this function is freed concurrently while the caller is still
  * using it.
  */
-ulong nvmap_get_id_from_dmabuf_fd(struct nvmap_client *client, int fd)
+struct nvmap_handle *nvmap_get_id_from_dmabuf_fd(struct nvmap_client *client,
+						 int fd)
 {
-	ulong id = -EINVAL;
+	struct nvmap_handle *handle = ERR_PTR(-EINVAL);
 	struct dma_buf *dmabuf;
 	struct nvmap_handle_info *info;
 
 	dmabuf = dma_buf_get(fd);
 	if (IS_ERR(dmabuf))
-		return PTR_ERR(dmabuf);
+		return ERR_CAST(dmabuf);
 	if (dmabuf->ops == &nvmap_dma_buf_ops) {
 		info = dmabuf->priv;
-		id = (ulong) info->handle;
-		if (!nvmap_handle_get(info->handle))
-			id = -EINVAL;
+		handle = info->handle;
+		if (!nvmap_handle_get(handle))
+			handle = ERR_PTR(-EINVAL);
 	}
 	dma_buf_put(dmabuf);
-	return id;
+	return handle;
 }
 
 int nvmap_ioctl_share_dmabuf(struct file *filp, void __user *arg)
 {
 	struct nvmap_create_handle op;
 	struct nvmap_client *client = filp->private_data;
-	ulong handle;
+	struct nvmap_handle *handle;
 
 	BUG_ON(!client);
 
 	if (copy_from_user(&op, (void __user *)arg, sizeof(op)))
 		return -EFAULT;
 
-	handle = unmarshal_user_id(op.id);
+	handle = unmarshal_user_handle(op.id);
 	if (!handle)
 		return -EINVAL;
 
 	op.fd = nvmap_get_dmabuf_fd(client, handle);
-	nvmap_handle_put((struct nvmap_handle *)handle);
+	nvmap_handle_put(handle);
 	if (op.fd < 0)
 		return op.fd;
 
@@ -727,6 +736,9 @@ int nvmap_ioctl_share_dmabuf(struct file *filp, void __user *arg)
 int nvmap_get_dmabuf_param(struct dma_buf *dmabuf, u32 param, u64 *result)
 {
 	struct nvmap_handle_info *info;
+
+	if (dmabuf->ops != &nvmap_dma_buf_ops)
+		return -EINVAL;
 
 	if (WARN_ON(!virt_addr_valid(dmabuf)))
 		return -EINVAL;
@@ -752,32 +764,6 @@ void nvmap_dmabuf_free_sg_table(struct dma_buf *dmabuf, struct sg_table *sgt)
 		return;
 
 	__nvmap_free_sg_table(NULL, NULL, sgt);
-}
-
-void nvmap_set_dmabuf_private(struct dma_buf *dmabuf, void *priv,
-		void (*delete)(void *priv))
-{
-	struct nvmap_handle_info *info;
-
-	if (WARN_ON(!virt_addr_valid(dmabuf)))
-		return;
-
-	info = dmabuf->priv;
-	info->handle->nvhost_priv = priv;
-	info->handle->nvhost_priv_delete = delete;
-}
-
-void *nvmap_get_dmabuf_private(struct dma_buf *dmabuf)
-{
-	void *priv;
-	struct nvmap_handle_info *info;
-
-	if (WARN_ON(!virt_addr_valid(dmabuf)))
-		return ERR_PTR(-EINVAL);
-
-	info = dmabuf->priv;
-	priv = info->handle->nvhost_priv;
-	return priv;
 }
 
 /*
@@ -811,7 +797,7 @@ static int __nvmap_dmabuf_stashes_show(struct seq_file *s, void *data)
 		seq_printf(s, "  device = %s\n",
 			   dev_name(handle->attachment->dev));
 		addr = sg_dma_address(nvmap_sgt->sgt->sgl);
-		seq_printf(s, "  IO addr = 0x%pa + 0x%x\n",
+		seq_printf(s, "  IO addr = 0x%pa + 0x%zx\n",
 			&addr, handle->size);
 
 		/* Cleanup. */

@@ -2,7 +2,6 @@
  * drivers/video/tegra/dc/bandwidth.c
  *
  * Copyright (c) 2010-2014, NVIDIA CORPORATION, All rights reserved.
- * Copyright (C) 2016 XiaoMi, Inc.
  *
  * Author: Jon Mayo <jmayo@nvidia.com>
  *
@@ -21,13 +20,14 @@
 #include <linux/kernel.h>
 #include <linux/clk.h>
 #include <linux/clk/tegra.h>
+#include <linux/math64.h>
 
 #include <mach/dc.h>
 #include <mach/fb.h>
 #include <mach/mc.h>
 #include <linux/nvhost.h>
 #include <mach/latency_allowance.h>
-#include "../../../../arch/arm/mach-tegra/tegra_emc.h"
+#include <mach/tegra_emc.h>
 #include <trace/events/display.h>
 
 #include "dc_reg.h"
@@ -158,13 +158,13 @@ static void calc_disp_params(struct tegra_dc *dc,
 	unsigned int bw_mbps_fp = la_params.la_real_to_fp(bw_mbps);
 	bool active = WIN_IS_ENABLED(w);
 	bool win_rotated = false;
-	unsigned int window_width = dfixed_trunc(w->w);
 	unsigned int surface_width = 0;
 	bool vertical_scaling_enabled = false;
 	bool pitch = !WIN_IS_BLOCKLINEAR(w) && !WIN_IS_TILED(w);
 	bool planar = tegra_dc_is_yuv_planar(w->fmt);
-	bool packed_yuv422 = ((w->fmt == TEGRA_WIN_FMT_YCbCr422) ||
-				(w->fmt == TEGRA_WIN_FMT_YUV422));
+	bool packed_yuv422 =
+			((tegra_dc_fmt(w->fmt) == TEGRA_WIN_FMT_YCbCr422) ||
+			(tegra_dc_fmt(w->fmt) == TEGRA_WIN_FMT_YUV422));
 	/* all of tegra's YUV formats(420 and 422) fetch 2 bytes per pixel,
 	 * but the size reported by tegra_dc_fmt_bpp for the planar version
 	 * is of the luma plane's size only. */
@@ -183,6 +183,10 @@ static void calc_disp_params(struct tegra_dc *dc,
 	unsigned int total_screen_area = total_h * total_v;
 	unsigned int total_active_area = mode.h_active * mode.v_active;
 	unsigned int total_blank_area = total_screen_area - total_active_area;
+	unsigned int c1_fp = 0;
+	unsigned int c2 = 0;
+	unsigned int c3 = 0;
+	unsigned int bpp_for_line_buffer_storage_fp = 0;
 	unsigned int reqd_buffering_thresh_disp_bytes_fp = 0;
 	unsigned int latency_buffering_available_in_reqd_buffering_fp = 0;
 	unsigned long emc_freq_khz = emc_freq_hz / 1000;
@@ -220,7 +224,7 @@ static void calc_disp_params(struct tegra_dc *dc,
 					bw_mbps *
 					max(bw_disruption_time_usec_fp,
 						total_latency_usec_fp) +
-					la_params.la_real_to_fp(1);
+					la_params.la_real_to_fp(1)/2;
 	unsigned int reqd_lines = 0;
 	unsigned int lines_of_latency = 0;
 	unsigned int thresh_lwm_bytes = 0;
@@ -286,79 +290,93 @@ static void calc_disp_params(struct tegra_dc *dc,
 		lines_of_latency = 0;
 
 
-	if ((DISP_CLIENT_LA_ID(la_id) == TEGRA_LA_DISPLAY_0A) ||
-		(DISP_CLIENT_LA_ID(la_id) == TEGRA_LA_DISPLAY_0B) ||
-		(DISP_CLIENT_LA_ID(la_id) == TEGRA_LA_DISPLAY_0C)) {
-		unsigned int c1 =
-			((w->fmt == TEGRA_WIN_FMT_YUV420P &&
-				win_rotated == false) ||
-			(tegra_dc_is_yuv(w->fmt) && win_rotated == true)) ?
-			3 : bytes_per_pixel;
-		unsigned int c2 = (w->fmt == packed_yuv422 &&
-					win_rotated == true) ? 2 : 1;
-
-		reqd_buffering_thresh_disp_bytes_fp =
-					la_params.la_real_to_fp(active *
-							surface_width *
-							reqd_lines *
-							c1 *
-							c2);
-		latency_buffering_available_in_reqd_buffering_fp =
-					la_params.la_real_to_fp(active *
-							surface_width *
-							lines_of_latency *
-							c1 *
-							c2);
-
-		if ((w->fmt == TEGRA_WIN_FMT_YUV422R) &&
-			(win_rotated == false)) {
-			reqd_buffering_thresh_disp_bytes_fp =
-				reqd_buffering_thresh_disp_bytes_fp * 5 / 2;
-			latency_buffering_available_in_reqd_buffering_fp =
-			latency_buffering_available_in_reqd_buffering_fp *
-			5 /
-			2;
-		}
-	} else if ((DISP_CLIENT_LA_ID(la_id) == TEGRA_LA_DISPLAYD) ||
-			(DISP_CLIENT_LA_ID(la_id) == TEGRA_LA_DISPLAY_T) ||
-			(DISP_CLIENT_LA_ID(la_id) == TEGRA_LA_DISPLAY_HC)) {
-		reqd_buffering_thresh_disp_bytes_fp =
-					la_params.la_real_to_fp(active *
-							bytes_per_pixel *
-							window_width *
-							reqd_lines);
-		latency_buffering_available_in_reqd_buffering_fp =
-					la_params.la_real_to_fp(active *
-							bytes_per_pixel *
-							window_width *
-							lines_of_latency);
-	} else if ((DISP_CLIENT_LA_ID(la_id) == TEGRA_LA_DISPLAY_0AB) ||
-			(DISP_CLIENT_LA_ID(la_id) == TEGRA_LA_DISPLAY_0BB) ||
-			(DISP_CLIENT_LA_ID(la_id) == TEGRA_LA_DISPLAY_0CB)) {
-		unsigned int c = (w->fmt == TEGRA_WIN_FMT_YUV420P) ?
-					3 : bytes_per_pixel;
-		reqd_buffering_thresh_disp_bytes_fp =
-					la_params.la_real_to_fp(c *
-							window_width *
-							reqd_lines *
-							active);
-		latency_buffering_available_in_reqd_buffering_fp =
-					la_params.la_real_to_fp(c *
-							window_width *
-							lines_of_latency *
-							active);
-
-		if (w->fmt == TEGRA_WIN_FMT_YUV422R) {
-			reqd_buffering_thresh_disp_bytes_fp =
-				reqd_buffering_thresh_disp_bytes_fp * 5 / 2;
-			latency_buffering_available_in_reqd_buffering_fp =
-			latency_buffering_available_in_reqd_buffering_fp *
-			5 /
-			2;
-		}
+	if (((tegra_dc_fmt(w->fmt) == TEGRA_WIN_FMT_YCbCr422R) ||
+		(tegra_dc_fmt(w->fmt) == TEGRA_WIN_FMT_YUV422R) ||
+		(tegra_dc_fmt(w->fmt) == TEGRA_WIN_FMT_YCbCr422RA) ||
+		(tegra_dc_fmt(w->fmt) == TEGRA_WIN_FMT_YUV422RA)) &&
+		!win_rotated) {
+		c1_fp = la_params.la_real_to_fp(5) / 2;
+	} else {
+		c1_fp = la_params.la_real_to_fp(1);
 	}
 
+	if ((((tegra_dc_fmt(w->fmt) == TEGRA_WIN_FMT_YCbCr420P) ||
+		(tegra_dc_fmt(w->fmt) == TEGRA_WIN_FMT_YUV420P) ||
+		(tegra_dc_fmt(w->fmt) == TEGRA_WIN_FMT_YCrCb420SP) ||
+		(tegra_dc_fmt(w->fmt) == TEGRA_WIN_FMT_YCbCr420SP) ||
+		(tegra_dc_fmt(w->fmt) == TEGRA_WIN_FMT_YVU420SP) ||
+		(tegra_dc_fmt(w->fmt) == TEGRA_WIN_FMT_YUV420SP)) &&
+		!win_rotated) ||
+		(tegra_dc_is_yuv(w->fmt) && win_rotated)) {
+		c2 = 3;
+	} else {
+		c2 = bytes_per_pixel;
+	}
 
+	c3 = (packed_yuv422 && win_rotated) ? 2 : 1;
+	latency_buffering_available_in_reqd_buffering_fp = active *
+							surface_width *
+							lines_of_latency *
+							c1_fp *
+							c2 *
+							c3;
+
+	switch (tegra_dc_fmt(w->fmt)) {
+	/* YUV 420 case*/
+	case TEGRA_WIN_FMT_YCbCr420P:
+	case TEGRA_WIN_FMT_YUV420P:
+	case TEGRA_WIN_FMT_YCrCb420SP:
+	case TEGRA_WIN_FMT_YCbCr420SP:
+	case TEGRA_WIN_FMT_YVU420SP:
+	case TEGRA_WIN_FMT_YUV420SP:
+		c1_fp = (win_rotated) ?
+			la_params.la_real_to_fp(2) :
+			la_params.la_real_to_fp(3);
+		break;
+
+	/* YUV 422 case */
+	case TEGRA_WIN_FMT_YCbCr422:
+	case TEGRA_WIN_FMT_YUV422:
+	case TEGRA_WIN_FMT_YCbCr422P:
+	case TEGRA_WIN_FMT_YUV422P:
+	case TEGRA_WIN_FMT_YCrCb422SP:
+	case TEGRA_WIN_FMT_YCbCr422SP:
+	case TEGRA_WIN_FMT_YVU422SP:
+	case TEGRA_WIN_FMT_YUV422SP:
+		c1_fp = (win_rotated) ?
+			la_params.la_real_to_fp(3) :
+			la_params.la_real_to_fp(2);
+		break;
+
+	/* YUV 422R case */
+	case TEGRA_WIN_FMT_YCbCr422R:
+	case TEGRA_WIN_FMT_YUV422R:
+	case TEGRA_WIN_FMT_YCbCr422RA:
+	case TEGRA_WIN_FMT_YUV422RA:
+		c1_fp = (win_rotated) ?
+			la_params.la_real_to_fp(2) :
+			la_params.la_real_to_fp(5);
+		break;
+
+	/* YUV 444 case */
+	case TEGRA_WIN_FMT_YCbCr444P:
+	case TEGRA_WIN_FMT_YUV444P:
+	case TEGRA_WIN_FMT_YVU444SP:
+	case TEGRA_WIN_FMT_YUV444SP:
+		c1_fp = la_params.la_real_to_fp(3);
+		break;
+
+	default:
+		c1_fp = la_params.la_real_to_fp(bytes_per_pixel);
+		break;
+	}
+
+	c2 = (packed_yuv422 && win_rotated) ? 2 : 1;
+	bpp_for_line_buffer_storage_fp = c1_fp * c2;
+	reqd_buffering_thresh_disp_bytes_fp = active *
+						surface_width *
+						reqd_lines *
+						bpp_for_line_buffer_storage_fp;
 	thresh_lwm_bytes =
 		la_params.la_fp_to_real(
 			reqd_buffering_thresh_disp_bytes_fp +
@@ -540,12 +558,11 @@ static void tegra_dc_set_latency_allowance(struct tegra_dc *dc,
 				bw,
 				disp_params);
 		if (!err) {
-			struct clk *emc_la_clk = clk_get(&dc->ndev->dev, "emc.la");
-			clk_set_rate(emc_la_clk, emc_freq_hz);
+			clk_set_rate(dc->emc_la_clk, emc_freq_hz);
 			break;
 		}
 
-		next_freq = clk_round_rate(emc_clk, emc_freq_hz + 1);
+		next_freq = clk_round_rate(emc_clk, emc_freq_hz + 1000000);
 
 		if (emc_freq_hz != next_freq)
 			emc_freq_hz = next_freq;
@@ -565,19 +582,13 @@ static void tegra_dc_set_latency_allowance(struct tegra_dc *dc,
 #endif
 }
 
-static int tegra_dc_windows_is_overlapped(struct tegra_dc_win *a,
-	struct tegra_dc_win *b)
+/* determine if a row is within a window */
+static int tegra_dc_line_in_window(int line, struct tegra_dc_win *win)
 {
-	if (a == b)
-		return 0;
+	int win_first = win->out_y;
+	int win_last = win_first + win->out_h - 1;
 
-	if (!WIN_IS_ENABLED(a) || !WIN_IS_ENABLED(b))
-		return 0;
-
-	/* because memory access to load the fifo can overlap, only care
-	 * if windows overlap vertically */
-	return ((a->out_y + a->out_h > b->out_y) && (a->out_y <= b->out_y)) ||
-		((b->out_y + b->out_h > a->out_y) && (b->out_y <= a->out_y));
+	return (line >= win_first && line <= win_last);
 }
 
 /* check overlapping window combinations to find the max bandwidth. */
@@ -586,18 +597,42 @@ static unsigned long tegra_dc_find_max_bandwidth(struct tegra_dc_win *wins[],
 {
 	unsigned i;
 	unsigned j;
-	unsigned long bw;
-	unsigned long max = 0;
+	long max = 0;
 
 	for (i = 0; i < n; i++) {
-		bw = wins[i]->new_bandwidth;
-		for (j = 0; j < n; j++)
-			if (tegra_dc_windows_is_overlapped(wins[i], wins[j]))
-				bw += wins[j]->new_bandwidth;
+		struct tegra_dc_win *a = wins[i];
+		long bw = 0;
+		int a_first = a->out_y;
+
+		if (!WIN_IS_ENABLED(a))
+			continue;
+		for (j = 0; j < n; j++) {
+			struct tegra_dc_win *b = wins[j];
+
+			if (!WIN_IS_ENABLED(b))
+				continue;
+			if (tegra_dc_line_in_window(a_first, b))
+				bw += b->new_bandwidth;
+		}
 		if (max < bw)
 			max = bw;
 	}
 	return max;
+}
+
+static inline int tegra_dc_is_yuv420(int fmt)
+{
+	switch (fmt) {
+	case TEGRA_WIN_FMT_YCbCr420P:
+	case TEGRA_WIN_FMT_YUV420P:
+	case TEGRA_WIN_FMT_YCrCb420SP:
+	case TEGRA_WIN_FMT_YCbCr420SP:
+	case TEGRA_WIN_FMT_YVU420SP:
+	case TEGRA_WIN_FMT_YUV420SP:
+		return 1;
+	default:
+		return 0;
+	}
 }
 
 /*
@@ -615,7 +650,7 @@ static unsigned long tegra_dc_find_max_bandwidth(struct tegra_dc_win *wins[],
 static unsigned long tegra_dc_calc_win_bandwidth(struct tegra_dc *dc,
 	struct tegra_dc_win *w)
 {
-	uint64_t ret;
+	u64 ret;
 	int tiled_windows_bw_multiplier;
 	unsigned long bpp;
 	unsigned in_w;
@@ -640,6 +675,10 @@ static unsigned long tegra_dc_calc_win_bandwidth(struct tegra_dc *dc,
 	 * is of the luma plane's size only. */
 	bpp = tegra_dc_is_yuv_planar(w->fmt) ?
 		2 * tegra_dc_fmt_bpp(w->fmt) : tegra_dc_fmt_bpp(w->fmt);
+#if defined(CONFIG_ARCH_TEGRA_12x_SOC)
+	if (tegra_dc_is_yuv420(w->fmt))
+		bpp = 16;
+#endif
 
 	ret = (dc->mode.pclk / 1000UL) * (bpp / 8);
 #if defined(CONFIG_ARCH_TEGRA_2x_SOC) || defined(CONFIG_ARCH_TEGRA_3x_SOC)
@@ -653,12 +692,9 @@ static unsigned long tegra_dc_calc_win_bandwidth(struct tegra_dc *dc,
 	 * Assuming 60% efficiency: i.e. if we calculate we need 70MBps, we
 	 * will request 117MBps from EMC.
 	 */
-	ret = ret + (17 * ret / 25);
+	ret = ret + (17 * div_u64(ret, 25));
 #endif
-	if ((dfixed_trunc(w->w) > 3804 || dfixed_trunc(w->h) > 3804))
-		ret *= 2;
-
-	return (unsigned long)ret;
+	return ret;
 }
 
 static unsigned long tegra_dc_get_bandwidth(
@@ -738,11 +774,20 @@ void tegra_dc_program_bandwidth(struct tegra_dc *dc, bool use_new)
 {
 	unsigned i;
 
+	if (!dc->enabled)
+		return;
+
+	if (!tegra_platform_is_silicon())
+		return;
+
 	if (use_new || dc->bw_kbps != dc->new_bw_kbps) {
 		long bw = max(dc->bw_kbps, dc->new_bw_kbps);
 
 #ifdef CONFIG_TEGRA_ISOMGR
 		int latency;
+
+		if (!dc->isomgr_handle)
+			return;
 
 		/* reserve atleast the minimum bandwidth. */
 		bw = max(bw, tegra_dc_calc_min_bandwidth(dc));
@@ -837,24 +882,25 @@ int tegra_dc_set_dynamic_emc(struct tegra_dc *dc)
 /* return the minimum bandwidth in kbps for display to function */
 long tegra_dc_calc_min_bandwidth(struct tegra_dc *dc)
 {
-	unsigned  pclk;
+	unsigned pclk = tegra_dc_get_out_max_pixclock(dc);
 
 	if (WARN_ONCE(!dc, "dc is NULL") ||
 		WARN_ONCE(!dc->out, "dc->out is NULL!"))
 		return 0;
-
-	pclk = tegra_dc_get_out_max_pixclock(dc);
 	if (!pclk) {
 		 if (dc->out->type == TEGRA_DC_OUT_HDMI) {
-#if defined(CONFIG_ARCH_TEGRA_11x_SOC) || defined(CONFIG_ARCH_TEGRA_12x_SOC)
+#if defined(CONFIG_ARCH_TEGRA_11x_SOC)
 			pclk = KHZ2PICOS(300000); /* 300MHz max */
 #else
 			pclk = KHZ2PICOS(150000); /* 150MHz max */
 #endif
-		} else {
-			if (!WARN_ONCE(!dc->mode.pclk,
-				"pclk is not set, bandwidth calc cannot work"))
+		} else if (dc->out->type == TEGRA_DC_OUT_DP) {
+			if (dc->mode.pclk)
 				pclk = KHZ2PICOS(dc->mode.pclk / 1000);
+			else
+				pclk = KHZ2PICOS(25200); /* vga */
+		} else {
+			pclk = KHZ2PICOS(dc->mode.pclk / 1000);
 		}
 	}
 

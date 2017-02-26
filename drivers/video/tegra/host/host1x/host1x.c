@@ -4,7 +4,6 @@
  * Tegra Graphics Host Driver Entrypoint
  *
  * Copyright (c) 2010-2014, NVIDIA Corporation. All rights reserved.
- * Copyright (C) 2016 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -46,7 +45,6 @@
 #include "nvhost_acm.h"
 #include "nvhost_channel.h"
 #include "nvhost_job.h"
-#include "nvhost_memmgr.h"
 
 #ifdef CONFIG_TEGRA_GRHOST_SYNC
 #include "nvhost_sync.h"
@@ -239,6 +237,31 @@ out:
 #endif
 }
 
+static int nvhost_ioctl_ctrl_sync_fence_set_name(
+	struct nvhost_ctrl_userctx *ctx,
+	struct nvhost_ctrl_sync_fence_name_args *args)
+{
+#ifdef CONFIG_TEGRA_GRHOST_SYNC
+	int err;
+	char name[32];
+	const char __user *args_name =
+		(const char __user *)(uintptr_t)args->name;
+
+	if (args_name) {
+		if (strncpy_from_user(name, args_name, sizeof(name)) < 0)
+			return -EFAULT;
+		name[sizeof(name) - 1] = '\0';
+	} else {
+		name[0] = '\0';
+	}
+
+	err = nvhost_sync_fence_set_name(args->fence_fd, name);
+	return err;
+#else
+	return -EINVAL;
+#endif
+}
+
 static int nvhost_ioctl_ctrl_module_mutex(struct nvhost_ctrl_userctx *ctx,
 	struct nvhost_ctrl_module_mutex_args *args)
 {
@@ -406,6 +429,9 @@ static long nvhost_ctrlctl(struct file *filp,
 	case NVHOST_IOCTL_CTRL_SYNC_FENCE_CREATE:
 		err = nvhost_ioctl_ctrl_sync_fence_create(priv, (void *)buf);
 		break;
+	case NVHOST_IOCTL_CTRL_SYNC_FENCE_SET_NAME:
+		err = nvhost_ioctl_ctrl_sync_fence_set_name(priv, (void *)buf);
+		break;
 	case NVHOST_IOCTL_CTRL_MODULE_MUTEX:
 		err = nvhost_ioctl_ctrl_module_mutex(priv, (void *)buf);
 		break;
@@ -511,7 +537,6 @@ static inline int nvhost_set_sysfs_capability_node(
 				struct nvhost_capability_node *node,
 				int (*func)(struct nvhost_syncpt *sp))
 {
-	sysfs_attr_init(&node->attr.attr);
 	node->attr.attr.name = name;
 	node->attr.attr.mode = S_IRUGO;
 	node->attr.show = nvhost_syncpt_capability_show;
@@ -754,13 +779,6 @@ static int nvhost_probe(struct platform_device *dev)
 		goto fail;
 	}
 
-	host->memmgr = nvhost_memmgr_alloc_mgr();
-	if (!host->memmgr) {
-		dev_err(&dev->dev, "unable to create nvmap client\n");
-		err = -EIO;
-		goto fail;
-	}
-
 	err = nvhost_syncpt_init(dev, &host->syncpt);
 	if (err)
 		goto fail;
@@ -787,11 +805,15 @@ static int nvhost_probe(struct platform_device *dev)
 	nvhost_module_busy(dev);
 
 	nvhost_syncpt_reset(&host->syncpt);
-	nvhost_intr_start(&host->intr, clk_get_rate(pdata->clk[0]));
+	if (tegra_cpu_is_asim())
+		/* for simulation, use a fake clock rate */
+		nvhost_intr_start(&host->intr, 12000000);
+	else
+		nvhost_intr_start(&host->intr, clk_get_rate(pdata->clk[0]));
 
 	nvhost_device_list_init();
-	pdata->nvhost_timeout_default =
-			CONFIG_TEGRA_GRHOST_DEFAULT_TIMEOUT;
+	pdata->nvhost_timeout_default = tegra_platform_is_linsim() ?
+			0 : CONFIG_TEGRA_GRHOST_DEFAULT_TIMEOUT;
 	nvhost_debug_init(host);
 
 	nvhost_module_idle(dev);
@@ -801,8 +823,6 @@ static int nvhost_probe(struct platform_device *dev)
 
 fail:
 	nvhost_free_resources(host);
-	if (host->memmgr)
-		nvhost_memmgr_put_mgr(host->memmgr);
 	kfree(host);
 	return err;
 }

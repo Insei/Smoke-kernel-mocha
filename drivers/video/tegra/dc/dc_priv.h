@@ -4,7 +4,7 @@
  * Copyright (C) 2010 Google, Inc.
  * Author: Erik Gilling <konkers@android.com>
  *
- * Copyright (c) 2010-2013, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2010-2014, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -42,9 +42,9 @@
 #define WIN_ALL_ACT_REQ (WIN_A_ACT_REQ | WIN_B_ACT_REQ | WIN_C_ACT_REQ)
 #endif
 
-static inline void tegra_dc_io_start(struct tegra_dc *dc)
+static inline int tegra_dc_io_start(struct tegra_dc *dc)
 {
-	nvhost_module_busy_ext(dc->ndev);
+	return nvhost_module_busy_ext(dc->ndev);
 }
 
 static inline void tegra_dc_io_end(struct tegra_dc *dc)
@@ -313,6 +313,12 @@ static inline bool tegra_dc_is_powered(struct tegra_dc *dc)
 	return tegra_powergate_is_powered(dc->powergate_id);
 }
 
+static inline void tegra_dc_set_edid(struct tegra_dc *dc,
+	struct tegra_edid *edid)
+{
+	dc->edid = edid;
+}
+
 void tegra_dc_powergate_locked(struct tegra_dc *dc);
 void tegra_dc_unpowergate_locked(struct tegra_dc *dc);
 #else
@@ -325,14 +331,24 @@ static inline bool tegra_dc_is_powered(struct tegra_dc *dc)
 #endif
 
 #ifdef CONFIG_ARCH_DMA_ADDR_T_64BIT
-static inline u32 tegra_dc_reg_l32(dma_addr_t reg)
+static inline u32 tegra_dc_reg_l32(dma_addr_t v)
 {
-	return reg & 0xffffffff;
+	return v & 0xffffffff;
 }
 
-static inline u32 tegra_dc_reg_h32(dma_addr_t reg)
+static inline u32 tegra_dc_reg_h32(dma_addr_t v)
 {
-	return reg >> 32;
+	return v >> 32;
+}
+#else
+static inline u32 tegra_dc_reg_l32(dma_addr_t v)
+{
+	return v;
+}
+
+static inline u32 tegra_dc_reg_h32(dma_addr_t v)
+{
+	return 0;
 }
 #endif
 extern struct tegra_dc_out_ops tegra_dc_rgb_ops;
@@ -343,6 +359,9 @@ extern struct tegra_dc_out_ops tegra_dc_dp_ops;
 #endif
 #ifdef CONFIG_TEGRA_LVDS
 extern struct tegra_dc_out_ops tegra_dc_lvds_ops;
+#endif
+#ifdef CONFIG_TEGRA_NVSR
+extern struct tegra_dc_out_ops tegra_dc_nvsr_ops;
 #endif
 
 /* defined in dc_sysfs.c, used by dc.c */
@@ -375,6 +394,13 @@ void tegra_dc_put(struct tegra_dc *dc);
 /* defined in dc.c, used in window.c */
 void tegra_dc_hold_dc_out(struct tegra_dc *dc);
 void tegra_dc_release_dc_out(struct tegra_dc *dc);
+
+/* defined in dc.c, used in ext/dev.c */
+int tegra_dc_config_frame_end_intr(struct tegra_dc *dc, bool enable);
+
+/* defined in dc.c, used in dsi.c */
+int _tegra_dc_wait_for_frame_end(struct tegra_dc *dc,
+	u32 timeout_ms);
 
 /* defined in bandwidth.c, used in dc.c */
 void tegra_dc_clear_bandwidth(struct tegra_dc *dc);
@@ -412,6 +438,7 @@ void tegra_dc_set_color_control(struct tegra_dc *dc);
 #ifdef CONFIG_TEGRA_DC_CMU
 void tegra_dc_cmu_enable(struct tegra_dc *dc, bool cmu_enable);
 int tegra_dc_update_cmu(struct tegra_dc *dc, struct tegra_dc_cmu *cmu);
+int tegra_dc_update_cmu_aligned(struct tegra_dc *dc, struct tegra_dc_cmu *cmu);
 #endif
 
 struct tegra_dc_platform_data

@@ -3,7 +3,7 @@
  *
  * Tegra Graphics Host 3D
  *
- * Copyright (c) 2012-2013 NVIDIA Corporation.  All rights reserved.
+ * Copyright (c) 2012-2014 NVIDIA Corporation.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -45,7 +45,6 @@
 #include "bus_client.h"
 #include "nvhost_channel.h"
 #include "chip_support.h"
-#include "pod_scaling.h"
 #include "class_ids.h"
 #include "nvhost_job.h"
 
@@ -129,7 +128,7 @@ void nvhost_3dctx_restore_push(struct nvhost_hwctx *nctx,
 		struct nvhost_cdma *cdma)
 {
 	struct host1x_hwctx *ctx = to_host1x_hwctx(nctx);
-	_nvhost_cdma_push_gather(cdma,
+	nvhost_cdma_push_gather(cdma,
 		ctx->cpuva,
 		ctx->iova,
 		0,

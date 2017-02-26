@@ -4,7 +4,6 @@
  * Tegra Graphics ISP
  *
  * Copyright (c) 2012-2014, NVIDIA Corporation.  All rights reserved.
- * Copyright (C) 2016 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -154,7 +153,24 @@ static int isp_isomgr_request(struct isp *tegra_isp, uint isp_bw, uint lt)
 		"%s: failed to realize %u KBps\n", __func__, isp_bw);
 			return -ENOMEM;
 	}
-	return ret;
+	return 0;
+}
+
+static int isp_isomgr_release(struct isp *tegra_isp)
+{
+	int ret = 0;
+	dev_dbg(&tegra_isp->ndev->dev, "%s++\n", __func__);
+
+	/* deallocate isomgr bw */
+	ret = isp_isomgr_request(tegra_isp, 0, 0);
+	if (ret) {
+		dev_err(&tegra_isp->ndev->dev,
+		"%s: failed to deallocate memory in isomgr\n",
+		__func__);
+		return -ENOMEM;
+	}
+
+	return 0;
 }
 #endif
 
@@ -173,7 +189,7 @@ int tegra_isp_register_mfi_cb(callback cb, void *cb_arg)
 {
 	if (mfi_callback || mfi_callback_arg) {
 		pr_err("cb already registered\n");
-		return -EPERM;
+		return -1;
 	}
 
 	mutex_lock(&isp_isr_lock);
@@ -219,14 +235,14 @@ static irqreturn_t isp_isr(int irq, void *dev_id)
 
 	reg = tegra_isp_read(dev, 0xf8);
 
-	if (reg & (1 << 5)) {
+	if (reg | (1<<5)) {
 		/* Disable */
 		enable_reg = tegra_isp_read(dev, 0x14c);
 		enable_reg &= ~1;
 		tegra_isp_write(dev, 0x14c, enable_reg);
 
 		/* Clear */
-		reg &= (1 << 5);
+		reg = reg & (1<<5);
 		tegra_isp_write(dev, 0xf8, reg);
 
 		/* put work into queue */
@@ -264,6 +280,7 @@ static int isp_probe(struct platform_device *dev)
 		if (dev_id == T12_ISPA_DEV_ID)
 			pdata = &t124_isp_info;
 #endif
+
 	} else
 		pdata = (struct nvhost_device_data *)dev->dev.platform_data;
 
@@ -289,12 +306,6 @@ static int isp_probe(struct platform_device *dev)
 
 	tegra_isp->dev_id = dev_id;
 	tegra_isp->ndev = dev;
-
-#if defined(CONFIG_TEGRA_ISOMGR)
-	err = isp_isomgr_register(tegra_isp);
-	if (err)
-		goto camera_isp_unregister;
-#endif
 
 	pdata->private_data = tegra_isp;
 
@@ -362,11 +373,8 @@ static int isp_probe(struct platform_device *dev)
 	return 0;
 
 camera_isp_unregister:
-#if defined(CONFIG_TEGRA_ISOMGR)
-	if (tegra_isp->isomgr_handle)
-		isp_isomgr_unregister(tegra_isp);
-#endif
 	dev_err(&dev->dev, "%s: failed\n", __func__);
+
 	return err;
 }
 
@@ -385,7 +393,6 @@ static int __exit isp_remove(struct platform_device *dev)
 #else
 	nvhost_module_disable_clk(&dev->dev);
 #endif
-
 	nvhost_client_device_release(dev);
 #ifdef TEGRA_12X_OR_HIGHER_CONFIG
 	disable_irq(tegra_isp->irq);
@@ -466,6 +473,19 @@ long isp_ioctl(struct file *file,
 		}
 
 #if defined(CONFIG_TEGRA_ISOMGR)
+		/*
+		 * Register ISP as isomgr client.
+		 */
+		if (!tegra_isp->isomgr_handle) {
+			ret = isp_isomgr_register(tegra_isp);
+			if (ret) {
+				dev_err(&tegra_isp->ndev->dev,
+				"%s: failed to register ISP as isomgr client\n",
+				__func__);
+				return -ENOMEM;
+			}
+		}
+
 		if (tegra_isp->isomgr_handle &&
 			la_client == ISP_HARD_ISO_CLIENT) {
 			/*
@@ -482,8 +502,7 @@ long isp_ioctl(struct file *file,
 			isp_bw = isp_bw * 1000;
 
 			ret = isp_isomgr_request(tegra_isp, isp_bw, 4);
-
-			if (!ret) {
+			if (ret) {
 				dev_err(&tegra_isp->ndev->dev,
 				"%s: failed to reserve %u KBps with isomgr\n",
 				__func__, isp_bw);
@@ -517,11 +536,27 @@ static int isp_open(struct inode *inode, struct file *file)
 		return -ENODEV;
 
 	file->private_data = tegra_isp;
+
 	return 0;
 }
 
 static int isp_release(struct inode *inode, struct file *file)
 {
+#if defined(CONFIG_TEGRA_ISOMGR)
+	int ret = 0;
+	struct isp *tegra_isp = file->private_data;
+
+	/* nullify isomgr request */
+	if (tegra_isp->isomgr_handle) {
+		ret = isp_isomgr_release(tegra_isp);
+		if (ret) {
+			dev_err(&tegra_isp->ndev->dev,
+			"%s: failed to deallocate memory in isomgr\n",
+			__func__);
+			return -ENOMEM;
+		}
+	}
+#endif
 	return 0;
 }
 

@@ -49,21 +49,6 @@ static bool tegra_dc_windows_are_clean(struct tegra_dc_win *windows[],
 	return true;
 }
 
-int tegra_dc_config_frame_end_intr(struct tegra_dc *dc, bool enable)
-{
-
-	mutex_lock(&dc->lock);
-	tegra_dc_io_start(dc);
-	if (enable) {
-		atomic_inc(&dc->frame_end_ref);
-		tegra_dc_unmask_interrupt(dc, FRAME_END_INT);
-	} else if (!atomic_dec_return(&dc->frame_end_ref))
-		tegra_dc_mask_interrupt(dc, FRAME_END_INT);
-	tegra_dc_io_end(dc);
-	mutex_unlock(&dc->lock);
-	return 0;
-}
-
 static int get_topmost_window(u32 *depths, unsigned long *wins, int win_num)
 {
 	int idx, best = -1;
@@ -448,6 +433,15 @@ int tegra_dc_update_windows(struct tegra_dc_win *windows[], int n)
 	dc = windows[0]->dc;
 	trace_update_windows(dc);
 
+	/* check that window arguments are valid */
+	for (i = 0; i < n; i++) {
+		struct tegra_dc_win *win = windows[i];
+		struct tegra_dc_win *dc_win =
+			win ? tegra_dc_get_window(dc, win->idx) : NULL;
+		if (WARN_ONCE(!dc_win, "ignoring invalid windows in request"))
+			return -EINVAL;
+	}
+
 	if (dc->out->flags & TEGRA_DC_OUT_ONE_SHOT_MODE) {
 		/* Acquire one_shot_lock to avoid race condition between
 		 * cancellation of old delayed work and schedule of new
@@ -478,7 +472,7 @@ int tegra_dc_update_windows(struct tegra_dc_win *windows[], int n)
 		tegra_dc_writel(dc, WRITE_MUX_ASSEMBLY | READ_MUX_ASSEMBLY,
 			DC_CMD_STATE_ACCESS);
 
-	for_each_set_bit(i, &dc->valid_windows, n) {
+	for (i = 0; i < n; i++) {
 		struct tegra_dc_win *win = windows[i];
 		struct tegra_dc_win *dc_win = tegra_dc_get_window(dc, win->idx);
 		bool scan_column = 0;
@@ -572,57 +566,48 @@ int tegra_dc_update_windows(struct tegra_dc_win *windows[], int n)
 		tegra_dc_writel(dc, 0, DC_WIN_UV_BUF_STRIDE);
 #endif
 
-#if defined(CONFIG_ARCH_DMA_ADDR_T_64BIT)
-		tegra_dc_writel(dc,
-			tegra_dc_reg_l32(win->phys_addr),
-			DC_WINBUF_START_ADDR);
-		tegra_dc_writel(dc,
-			tegra_dc_reg_h32(win->phys_addr),
-			DC_WINBUF_START_ADDR_HI);
+#if defined(CONFIG_ARCH_TEGRA_2x_SOC) || defined(CONFIG_ARCH_TEGRA_3x_SOC) || \
+	defined(CONFIG_ARCH_TEGRA_11x_SOC) || defined(CONFIG_ARCH_TEGRA_14x_SOC)
+		tegra_dc_writel(dc, win->phys_addr, DC_WINBUF_START_ADDR);
 #else
-		tegra_dc_writel(dc, win->phys_addr,
+		tegra_dc_writel(dc, tegra_dc_reg_l32(win->phys_addr),
 			DC_WINBUF_START_ADDR);
+		tegra_dc_writel(dc, tegra_dc_reg_h32(win->phys_addr),
+			DC_WINBUF_START_ADDR_HI);
 #endif
 		if (!yuvp && !yuvsp) {
 			tegra_dc_writel(dc, win->stride, DC_WIN_LINE_STRIDE);
 		} else if (yuvp) {
-#if defined(CONFIG_ARCH_DMA_ADDR_T_64BIT)
-			tegra_dc_writel(dc,
-				tegra_dc_reg_l32(win->phys_addr_u),
+#if defined(CONFIG_ARCH_TEGRA_2x_SOC) || defined(CONFIG_ARCH_TEGRA_3x_SOC) || \
+	defined(CONFIG_ARCH_TEGRA_11x_SOC) || defined(CONFIG_ARCH_TEGRA_14x_SOC)
+			tegra_dc_writel(dc, win->phys_addr_u,
 				DC_WINBUF_START_ADDR_U);
-			tegra_dc_writel(dc,
-				tegra_dc_reg_h32(win->phys_addr_u),
-				DC_WINBUF_START_ADDR_HI_U);
-			tegra_dc_writel(dc,
-				tegra_dc_reg_l32(win->phys_addr_v),
+			tegra_dc_writel(dc, win->phys_addr_v,
 				DC_WINBUF_START_ADDR_V);
-			tegra_dc_writel(dc,
-				tegra_dc_reg_h32(win->phys_addr_v),
-				DC_WINBUF_START_ADDR_HI_V);
 #else
-			tegra_dc_writel(dc,
-				win->phys_addr_u,
+			tegra_dc_writel(dc, tegra_dc_reg_l32(win->phys_addr_u),
 				DC_WINBUF_START_ADDR_U);
-			tegra_dc_writel(dc,
-				win->phys_addr_v,
+			tegra_dc_writel(dc, tegra_dc_reg_h32(win->phys_addr_u),
+				DC_WINBUF_START_ADDR_HI_U);
+			tegra_dc_writel(dc, tegra_dc_reg_l32(win->phys_addr_v),
 				DC_WINBUF_START_ADDR_V);
+			tegra_dc_writel(dc, tegra_dc_reg_h32(win->phys_addr_v),
+				DC_WINBUF_START_ADDR_HI_V);
 #endif
 			tegra_dc_writel(dc,
 				LINE_STRIDE(win->stride) |
 				UV_LINE_STRIDE(win->stride_uv),
 				DC_WIN_LINE_STRIDE);
 		} else {
-#if defined(CONFIG_ARCH_DMA_ADDR_T_64BIT)
-			tegra_dc_writel(dc,
-				tegra_dc_reg_l32(win->phys_addr_u),
-				DC_WINBUF_START_ADDR_U);
-			tegra_dc_writel(dc,
-				tegra_dc_reg_h32(win->phys_addr_u),
-				DC_WINBUF_START_ADDR_HI_U);
-#else
-			tegra_dc_writel(dc,
-					win->phys_addr_u,
+#if defined(CONFIG_ARCH_TEGRA_2x_SOC) || defined(CONFIG_ARCH_TEGRA_3x_SOC) || \
+	defined(CONFIG_ARCH_TEGRA_11x_SOC) || defined(CONFIG_ARCH_TEGRA_14x_SOC)
+			tegra_dc_writel(dc, win->phys_addr_u,
 					DC_WINBUF_START_ADDR_U);
+#else
+			tegra_dc_writel(dc, tegra_dc_reg_l32(win->phys_addr_u),
+				DC_WINBUF_START_ADDR_U);
+			tegra_dc_writel(dc, tegra_dc_reg_h32(win->phys_addr_u),
+				DC_WINBUF_START_ADDR_HI_U);
 #endif
 			tegra_dc_writel(dc,
 					LINE_STRIDE(win->stride) |
@@ -656,7 +641,7 @@ int tegra_dc_update_windows(struct tegra_dc_win *windows[], int n)
 	if (tegra_dc_feature_has_interlace(dc, win->idx) &&
 		(dc->mode.vmode == FB_VMODE_INTERLACED)) {
 
-#if defined(CONFIG_ARCH_DMA_ADDR_T_64BIT)
+#if defined(CONFIG_ARCH_TEGRA_12x_SOC)
 			tegra_dc_writel(dc, tegra_dc_reg_l32
 				(win->phys_addr2),
 				DC_WINBUF_START_ADDR_FIELD2);
@@ -669,43 +654,35 @@ int tegra_dc_update_windows(struct tegra_dc_win *windows[], int n)
 				DC_WINBUF_START_ADDR_FIELD2);
 #endif
 		if (yuvp) {
-#if defined(CONFIG_ARCH_DMA_ADDR_T_64BIT)
-			tegra_dc_writel(dc,
-				tegra_dc_reg_l32(win->phys_addr_u2),
+#if defined(CONFIG_ARCH_TEGRA_2x_SOC) || defined(CONFIG_ARCH_TEGRA_3x_SOC) || \
+	defined(CONFIG_ARCH_TEGRA_11x_SOC) || defined(CONFIG_ARCH_TEGRA_14x_SOC)
+			tegra_dc_writel(dc, win->phys_addr_u2,
 				DC_WINBUF_START_ADDR_FIELD2_U);
-			tegra_dc_writel(dc,
-				tegra_dc_reg_h32(win->phys_addr_u2),
+
+			tegra_dc_writel(dc, win->phys_addr_v2,
+				DC_WINBUF_START_ADDR_FIELD2_V);
+#else
+			tegra_dc_writel(dc, tegra_dc_reg_l32(win->phys_addr_u2),
+				DC_WINBUF_START_ADDR_FIELD2_U);
+			tegra_dc_writel(dc, tegra_dc_reg_h32(win->phys_addr_u2),
 				DC_WINBUF_START_ADDR_FIELD2_HI_U);
 
-			tegra_dc_writel(dc,
-				tegra_dc_reg_l32(win->phys_addr_v2),
+			tegra_dc_writel(dc, tegra_dc_reg_l32(win->phys_addr_v2),
 				DC_WINBUF_START_ADDR_FIELD2_V);
-			tegra_dc_writel(dc,
-				tegra_dc_reg_h32(win->phys_addr_v2),
+			tegra_dc_writel(dc, tegra_dc_reg_h32(win->phys_addr_v2),
 				DC_WINBUF_START_ADDR_FIELD2_HI_V);
-#else
-			tegra_dc_writel(dc,
-				win->phys_addr_u2,
-				DC_WINBUF_START_ADDR_FIELD2_U);
-
-			tegra_dc_writel(dc,
-				win->phys_addr_v2,
-				DC_WINBUF_START_ADDR_FIELD2_V);
 #endif
 		} else if (yuvsp) {
-#if defined(CONFIG_ARCH_DMA_ADDR_T_64BIT)
-			tegra_dc_writel(dc, tegra_dc_reg_l32
-				(win->phys_addr_u2),
+#if defined(CONFIG_ARCH_TEGRA_2x_SOC) || defined(CONFIG_ARCH_TEGRA_3x_SOC) || \
+	defined(CONFIG_ARCH_TEGRA_11x_SOC) || defined(CONFIG_ARCH_TEGRA_14x_SOC)
+			tegra_dc_writel(dc, win->phys_addr_u2,
 				DC_WINBUF_START_ADDR_FIELD2_U);
-			tegra_dc_writel(dc, tegra_dc_reg_h32
-				(win->phys_addr_u2),
-				DC_WINBUF_START_ADDR_FIELD2_HI_U);
 #else
-			tegra_dc_writel(dc,
-				win->phys_addr_u2,
+			tegra_dc_writel(dc, tegra_dc_reg_l32(win->phys_addr_u2),
 				DC_WINBUF_START_ADDR_FIELD2_U);
+			tegra_dc_writel(dc, tegra_dc_reg_h32(win->phys_addr_u2),
+				DC_WINBUF_START_ADDR_FIELD2_HI_U);
 #endif
-		} else {
 		}
 		tegra_dc_writel(dc, dfixed_trunc(h_offset),
 			DC_WINBUF_ADDR_H_OFFSET_FIELD2);
@@ -810,6 +787,11 @@ int tegra_dc_update_windows(struct tegra_dc_win *windows[], int n)
 				win_options |= INTERLACE_ENABLE;
 		}
 #endif
+		if (dc_win->csc_dirty) {
+			tegra_dc_set_csc(dc, &dc_win->csc);
+			dc_win->csc_dirty = false;
+		}
+
 		tegra_dc_writel(dc, win_options, DC_WIN_WIN_OPTIONS);
 
 		dc_win->dirty = no_vsync ? 0 : 1;

@@ -4,7 +4,6 @@
  * Tegra Graphics Host Automatic Clock Management
  *
  * Copyright (c) 2010-2014, NVIDIA Corporation. All rights reserved.
- * Copyright (C) 2016 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -34,6 +33,7 @@
 #include <linux/tegra-powergate.h>
 #include <linux/tegra-soc.h>
 #include <trace/events/nvhost.h>
+#include <linux/platform_data/tegra_edp.h>
 
 #include <mach/mc.h>
 #include <mach/pm_domains.h>
@@ -142,7 +142,7 @@ void nvhost_module_busy_noresume(struct platform_device *dev)
 #endif
 }
 
-void nvhost_module_busy(struct platform_device *dev)
+int nvhost_module_busy(struct platform_device *dev)
 {
 	struct nvhost_device_data *pdata = platform_get_drvdata(dev);
 	int ret = 0;
@@ -161,7 +161,10 @@ void nvhost_module_busy(struct platform_device *dev)
 	 * - The code below fixes this use-case
 	 */
 	if (dev->dev.parent && (dev->dev.parent != &platform_bus))
-		nvhost_module_busy(nvhost_get_parent(dev));
+		ret = nvhost_module_busy(nvhost_get_parent(dev));
+
+	if (ret)
+		return ret;
 
 #ifdef CONFIG_PM_RUNTIME
 	ret = pm_runtime_get_sync(&dev->dev);
@@ -170,11 +173,14 @@ void nvhost_module_busy(struct platform_device *dev)
 		if (dev->dev.parent && (dev->dev.parent != &platform_bus))
 			nvhost_module_idle(nvhost_get_parent(dev));
 		nvhost_err(&dev->dev, "failed to power on, err %d", ret);
+		return ret;
 	}
 #endif
 
 	if (pdata->busy)
 		pdata->busy(dev);
+
+	return 0;
 }
 
 void nvhost_module_disable_poweroff(struct platform_device *dev)
@@ -229,13 +235,17 @@ int nvhost_module_get_rate(struct platform_device *dev, unsigned long *rate,
 {
 	struct clk *c;
 	struct nvhost_device_data *pdata = platform_get_drvdata(dev);
+	int err = 0;
 
 	c = pdata->clk[index];
 	if (!c)
 		return -EINVAL;
 
 	/* Need to enable client to get correct rate */
-	nvhost_module_busy(dev);
+	err = nvhost_module_busy(dev);
+	if (err)
+		return err;
+
 	*rate = clk_get_rate(c);
 	nvhost_module_idle(dev);
 	return 0;
@@ -600,11 +610,15 @@ int nvhost_module_suspend(struct device *dev)
 	if (atomic_read(&dev->power.usage_count) > 1)
 		return -EBUSY;
 
+	if (pdata->prepare_poweroff)
+		pdata->prepare_poweroff(to_platform_device(dev));
+
 	if (pdata->suspend_ndev)
 		pdata->suspend_ndev(dev);
 
-	if (pdata->prepare_poweroff)
-		pdata->prepare_poweroff(to_platform_device(dev));
+	/* inform edp governor that there is no load any more */
+	if (pdata->gpu_edp_device)
+		tegra_edp_notify_gpu_load(0);
 
 	return 0;
 }
@@ -629,10 +643,8 @@ void nvhost_module_deinit(struct platform_device *dev)
 
 	if (!pm_runtime_enabled(&dev->dev))
 		nvhost_module_disable_clk(&dev->dev);
-	else {
-		pm_runtime_put(&dev->dev);
+	else
 		pm_runtime_disable(&dev->dev);
-	}
 
 	nvhost_module_suspend(&dev->dev);
 	for (i = 0; i < pdata->num_clks; i++)
@@ -656,6 +668,7 @@ const struct dev_pm_ops nvhost_module_pm_ops = {
 #endif
 };
 #endif
+EXPORT_SYMBOL(nvhost_module_pm_ops);
 
 /*FIXME Use API to get host1x domain */
 struct generic_pm_domain *host1x_domain;
@@ -706,6 +719,12 @@ int _nvhost_module_add_domain(struct generic_pm_domain *domain,
 
 	return ret;
 }
+
+void nvhost_register_client_domain(struct generic_pm_domain *domain)
+{
+	pm_genpd_add_subdomain(host1x_domain, domain);
+}
+EXPORT_SYMBOL(nvhost_register_client_domain);
 
 /* common runtime pm and power domain APIs */
 int nvhost_module_add_domain(struct generic_pm_domain *domain,
@@ -811,9 +830,6 @@ int nvhost_module_prepare_poweroff(struct device *dev)
 	if (!pdata)
 		return -EINVAL;
 
-	if (pdata->suspend_ndev)
-		pdata->suspend_ndev(dev);
-
 	if (pdata->prepare_poweroff)
 		pdata->prepare_poweroff(to_platform_device(dev));
 
@@ -823,15 +839,16 @@ int nvhost_module_prepare_poweroff(struct device *dev)
 int nvhost_module_finalize_poweron(struct device *dev)
 {
 	struct nvhost_device_data *pdata;
+	int ret = 0;
 
 	pdata = dev_get_drvdata(dev);
 	if (!pdata)
 		return -EINVAL;
 
 	if (pdata->finalize_poweron)
-		pdata->finalize_poweron(to_platform_device(dev));
+		ret = pdata->finalize_poweron(to_platform_device(dev));
 
-	return 0;
+	return ret;
 }
 #endif
 
@@ -851,19 +868,19 @@ bool nvhost_module_powered_ext(struct platform_device *dev)
 	return nvhost_module_powered(pdev);
 }
 
-void nvhost_module_busy_ext(struct platform_device *dev)
+int nvhost_module_busy_ext(struct platform_device *dev)
 {
 	struct platform_device *pdev;
 
 	if (!nvhost_get_parent(dev)) {
 		dev_err(&dev->dev, "Module busy called with wrong dev\n");
-		return;
+		return -EINVAL;
 	}
 
 	/* get the parent */
 	pdev = to_platform_device(dev->dev.parent);
 
-	nvhost_module_busy(pdev);
+	return nvhost_module_busy(pdev);
 }
 EXPORT_SYMBOL(nvhost_module_busy_ext);
 

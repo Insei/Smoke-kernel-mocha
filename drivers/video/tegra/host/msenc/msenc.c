@@ -3,7 +3,7 @@
  *
  * Tegra MSENC Module Support
  *
- * Copyright (c) 2012-2013, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2012-2014, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -23,12 +23,14 @@
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
 #include <linux/clk/tegra.h>
+#include <linux/tegra-soc.h>
 #include <asm/byteorder.h>      /* for parsing ucode image wrt endianness */
 #include <linux/delay.h>	/* for udelay */
 #include <linux/scatterlist.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
+#include <linux/dma-mapping.h>
 
 #include <mach/pm_domains.h>
 
@@ -39,7 +41,6 @@
 #include "nvhost_acm.h"
 #include "nvhost_scale.h"
 #include "chip_support.h"
-#include "nvhost_memmgr.h"
 #include "t114/t114.h"
 #include "t148/t148.h"
 #include "t124/t124.h"
@@ -148,6 +149,27 @@ static int msenc_wait_idle(struct platform_device *dev, u32 *timeout)
 	return -1;
 }
 
+static int msenc_wait_mem_scrubbing(struct platform_device *dev)
+{
+	int retries = MSENC_IDLE_TIMEOUT_DEFAULT / MSENC_IDLE_CHECK_PERIOD;
+	nvhost_dbg_fn("");
+
+	do {
+		u32 w = host1x_readl(dev, msenc_dmactl_r()) &
+			(msenc_dmactl_dmem_scrubbing_m() |
+			 msenc_dmactl_imem_scrubbing_m());
+
+		if (!w) {
+			nvhost_dbg_fn("done");
+			return 0;
+		}
+		udelay(MSENC_IDLE_CHECK_PERIOD);
+	} while (--retries || !tegra_platform_is_silicon());
+
+	nvhost_err(&dev->dev, "Falcon mem scrubbing timeout");
+	return -ETIMEDOUT;
+}
+
 int msenc_boot(struct platform_device *dev)
 {
 	u32 timeout;
@@ -158,6 +180,10 @@ int msenc_boot(struct platform_device *dev)
 	/* check if firmware is loaded or not */
 	if (!m || !m->valid)
 		return -ENOMEDIUM;
+
+	err = msenc_wait_mem_scrubbing(dev);
+	if (err)
+		return err;
 
 	host1x_writel(dev, msenc_dmactl_r(), 0);
 	host1x_writel(dev, msenc_dmatrfbase_r(),

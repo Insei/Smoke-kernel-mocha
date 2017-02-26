@@ -167,28 +167,58 @@ static struct tegra_dc_cmu default_cmu = {
 static int parse_dc_out_type(struct device_node *np,
 		struct tegra_dc_out *default_out)
 {
-	const char *temp_str0;
-	if (!of_property_read_string(np, "nvidia,out-type", &temp_str0)) {
-		if (!strncmp(temp_str0, "dsi", strlen(temp_str0))) {
-			default_out->type = TEGRA_DC_OUT_DSI;
-			OF_DC_LOG("dsi out\n");
-		} else if (!strncmp(temp_str0, "hdmi", strlen(temp_str0))) {
-			default_out->type = TEGRA_DC_OUT_HDMI;
-			OF_DC_LOG("hdmi out\n");
-		} else {
-			pr_err("no dc out support except dsi / hdmi\n");
+	u32 temp;
+	if (!of_property_read_u32(np, "nvidia,out-type", &temp)) {
+		if (temp == TEGRA_DC_OUT_DSI)
+			OF_DC_LOG("dsi out type\n");
+		else if (temp == TEGRA_DC_OUT_HDMI)
+			OF_DC_LOG("hdmi out type\n");
+		else {
+			pr_err("Not support except dsi / hdmi type\n");
 			return -EINVAL;
 		}
+		default_out->type = (int)temp;
+		return 0;
 	}
-	return 0;
+	/* out type should be parsed properly */
+	return -EINVAL;
 }
 
 static int parse_tmds(struct device_node *np,
 	u8 *addr)
 {
 	u32 temp;
+	int i = 0;
+	u32 major = 0;
+	u32 minor = 0;
+	struct property *prop;
+	const __be32 *p;
+	u32 u;
 	struct tmds_config *tmds_cfg_addr;
 	tmds_cfg_addr = (struct tmds_config *)addr;
+
+	of_property_for_each_u32(np, "version", prop, p, u)
+		i++;
+
+	if (i == 2) { /* major version, minor version */
+		i = 0;
+		of_property_for_each_u32(np,
+			"version", prop, p, u) {
+			i++;
+			if (i == 1)
+				major = u;
+			else
+				minor = u;
+		}
+		tmds_cfg_addr->version = MKDEV(major, minor);
+		OF_DC_LOG("tmds version 0x%x\n",
+			tmds_cfg_addr->version);
+	} else if (i == 0) {
+		OF_DC_LOG("there's no tmds conf version.\n");
+	} else {
+		OF_DC_LOG("need to have major, minor version\n");
+		goto parse_tmds_fail;
+	}
 
 	if (!of_property_read_u32(np, "pclk", &temp)) {
 		tmds_cfg_addr->pclk = (int)temp;
@@ -198,31 +228,43 @@ static int parse_tmds(struct device_node *np,
 	}
 	if (!of_property_read_u32(np, "pll0", &temp)) {
 		tmds_cfg_addr->pll0 = (u32)temp;
-		OF_DC_LOG("tmds pll0 %d\n", temp);
+		OF_DC_LOG("tmds pll0 0x%x\n", temp);
 	} else {
 		goto parse_tmds_fail;
 	}
 	if (!of_property_read_u32(np, "pll1", &temp)) {
 		tmds_cfg_addr->pll1 = (u32)temp;
-		OF_DC_LOG("tmds pll1 %d\n", temp);
+		OF_DC_LOG("tmds pll1 0x%x\n", temp);
 	} else {
 		goto parse_tmds_fail;
 	}
 	if (!of_property_read_u32(np, "pe-current", &temp)) {
 		tmds_cfg_addr->pe_current = (u32)temp;
-		OF_DC_LOG("tmds pe-current %d\n", temp);
+		OF_DC_LOG("tmds pe-current 0x%x\n", temp);
 	} else {
 		goto parse_tmds_fail;
 	}
 	if (!of_property_read_u32(np, "drive-current", &temp)) {
 		tmds_cfg_addr->drive_current = (u32)temp;
-		OF_DC_LOG("tmds drive-current %d\n", temp);
+		OF_DC_LOG("tmds drive-current 0x%x\n", temp);
 	} else {
 		goto parse_tmds_fail;
 	}
 	if (!of_property_read_u32(np, "peak-current", &temp)) {
 		tmds_cfg_addr->peak_current = (u32)temp;
-		OF_DC_LOG("tmds peak-current %d\n", temp);
+		OF_DC_LOG("tmds peak-current 0x%x\n", temp);
+	} else {
+		goto parse_tmds_fail;
+	}
+	if (!of_property_read_u32(np, "pad-ctls0-mask", &temp)) {
+		tmds_cfg_addr->pad_ctls0_mask = (u32)temp;
+		OF_DC_LOG("tmds pad_ctls0_mask 0x%x\n", temp);
+	} else {
+		goto parse_tmds_fail;
+	}
+	if (!of_property_read_u32(np, "pad-ctls0-setting", &temp)) {
+		tmds_cfg_addr->pad_ctls0_setting = (u32)temp;
+		OF_DC_LOG("tmds pad_ctls0_setting 0x%x\n", temp);
 	} else {
 		goto parse_tmds_fail;
 	}
@@ -232,12 +274,28 @@ parse_tmds_fail:
 	return -EINVAL;
 }
 
+static bool is_dc_default_out_flag(u32 flag)
+{
+	if ((flag == TEGRA_DC_OUT_HOTPLUG_HIGH) |
+		(flag == TEGRA_DC_OUT_HOTPLUG_LOW) |
+		(flag == TEGRA_DC_OUT_NVHDCP_POLICY_ALWAYS_ON) |
+		(flag == TEGRA_DC_OUT_NVHDCP_POLICY_ON_DEMAND) |
+		(flag == TEGRA_DC_OUT_CONTINUOUS_MODE) |
+		(flag == TEGRA_DC_OUT_ONE_SHOT_MODE) |
+		(flag == TEGRA_DC_OUT_N_SHOT_MODE) |
+		(flag == TEGRA_DC_OUT_ONE_SHOT_LP_MODE) |
+		(flag == TEGRA_DC_OUT_INITIALIZED_MODE) |
+		(flag == TEGRA_DC_OUT_HOTPLUG_WAKE_LP0))
+		return true;
+	else
+		return false;
+}
+
 static int parse_dc_default_out(struct platform_device *ndev,
 		struct device_node *np, struct tegra_dc_out *default_out)
 {
 	int err;
 	u32 temp;
-	const char *temp_str0;
 	int hotplug_gpio = 0;
 	enum of_gpio_flags flags;
 	struct device_node *ddc;
@@ -246,6 +304,10 @@ static int parse_dc_default_out(struct platform_device *ndev,
 	struct device_node *tmds_np = NULL;
 	struct device_node *entry = NULL;
 	u8 *addr;
+	struct property *prop;
+	const __be32 *p;
+	u32 u;
+	const char *temp_str0;
 
 	err = parse_dc_out_type(np, default_out);
 	if (err) {
@@ -259,6 +321,10 @@ static int parse_dc_default_out(struct platform_device *ndev,
 	if (!of_property_read_u32(np, "nvidia,out-height", &temp)) {
 		default_out->height = (unsigned) temp;
 		OF_DC_LOG("out_height %d\n", default_out->height);
+	}
+	if (!of_property_read_u32(np, "nvidia,out-rotation", &temp)) {
+		default_out->rotation = (unsigned) temp;
+		OF_DC_LOG("out_rotation %d\n", default_out->rotation);
 	}
 	if (np_hdmi && of_device_is_available(np_hdmi) &&
 		(default_out->type == TEGRA_DC_OUT_HDMI)) {
@@ -285,61 +351,43 @@ static int parse_dc_default_out(struct platform_device *ndev,
 			default_out->hotplug_gpio = hotplug_gpio;
 	}
 	if (!of_property_read_u32(np, "nvidia,out-max-pixclk", &temp)) {
-		default_out->max_pixclock = (unsigned) KHZ2PICOS(temp);
-		OF_DC_LOG("khz %d => out_dcc %d in picos unit\n",
-			temp, default_out->max_pixclock);
+		default_out->max_pixclock = (unsigned)temp;
+		OF_DC_LOG("%u max_pixclock in pico second unit\n",
+			default_out->max_pixclock);
 	}
-	if (!of_property_read_string(np, "nvidia,out-flags", &temp_str0)) {
-		if (!strncmp(temp_str0, "continuous", strlen(temp_str0))) {
-			default_out->flags = TEGRA_DC_OUT_CONTINUOUS_MODE;
-		} else if (!strncmp(temp_str0, "oneshot", strlen(temp_str0))) {
-			default_out->flags = TEGRA_DC_OUT_ONE_SHOT_MODE;
-		} else if (!strncmp(temp_str0, "continuous_initialized",
-			strlen(temp_str0))) {
-			default_out->flags = TEGRA_DC_OUT_CONTINUOUS_MODE |
-				TEGRA_DC_OUT_INITIALIZED_MODE;
-		} else if (!strncmp(temp_str0, "oneshot_initialized",
-			strlen(temp_str0))) {
-			default_out->flags = TEGRA_DC_OUT_ONE_SHOT_MODE |
-				TEGRA_DC_OUT_INITIALIZED_MODE;
-		} else if (!strncmp(temp_str0,
-			"hotplug_high", strlen(temp_str0))) {
-			default_out->flags = TEGRA_DC_OUT_HOTPLUG_HIGH;
-		} else if (!strncmp(temp_str0,
-			"hotplug_low", strlen(temp_str0))) {
-			default_out->flags = TEGRA_DC_OUT_HOTPLUG_LOW;
-		} else if (!strncmp(temp_str0,
-			"hotplug_high_wake_lp0", strlen(temp_str0))) {
-			default_out->flags = TEGRA_DC_OUT_HOTPLUG_HIGH |
-				TEGRA_DC_OUT_HOTPLUG_WAKE_LP0;
-		} else if (!strncmp(temp_str0,
-			"hotplug_low_wake_lp0", strlen(temp_str0))) {
-			default_out->flags = TEGRA_DC_OUT_HOTPLUG_LOW |
-				TEGRA_DC_OUT_HOTPLUG_WAKE_LP0;
-		} else {
+
+	of_property_for_each_u32(np, "nvidia,out-flags", prop, p, u) {
+		if (!is_dc_default_out_flag(u)) {
 			pr_err("invalid out flags\n");
 			return -EINVAL;
 		}
+		default_out->flags |= (unsigned) u;
 	}
-	if (!of_property_read_string(np, "nvidia,out-align", &temp_str0)) {
-		if (!strncmp(temp_str0, "msb", strlen(temp_str0))) {
-			default_out->align = TEGRA_DC_ALIGN_MSB;
-		} else if (!strncmp(temp_str0, "lsb", strlen(temp_str0))) {
-			default_out->align = TEGRA_DC_ALIGN_LSB;
-		} else {
+	OF_DC_LOG("default_out flag %u\n", default_out->flags);
+
+
+	if (!of_property_read_u32(np, "nvidia,out-align", &temp)) {
+		if (temp == TEGRA_DC_ALIGN_MSB)
+			OF_DC_LOG("tegra dc align msb\n");
+		else if (temp == TEGRA_DC_ALIGN_LSB)
+			OF_DC_LOG("tegra dc align lsb\n");
+		else {
 			pr_err("invalid out align\n");
 			return -EINVAL;
 		}
+		default_out->align = (unsigned)temp;
 	}
-	if (!of_property_read_string(np, "nvidia,out-order", &temp_str0)) {
-		if (!strncmp(temp_str0, "rtob", strlen(temp_str0))) {
-			default_out->order = TEGRA_DC_ORDER_RED_BLUE;
-		} else if (!strncmp(temp_str0, "btor", strlen(temp_str0))) {
-			default_out->order = TEGRA_DC_ORDER_BLUE_RED;
-		} else {
+
+	if (!of_property_read_u32(np, "nvidia,out-order", &temp)) {
+		if (temp == TEGRA_DC_ORDER_RED_BLUE)
+			OF_DC_LOG("tegra order red to blue\n");
+		else if (temp == TEGRA_DC_ORDER_BLUE_RED)
+			OF_DC_LOG("tegra order blue to red\n");
+		else {
 			pr_err("invalid out order\n");
 			return -EINVAL;
 		}
+		default_out->order = (unsigned)temp;
 	}
 
 	if (!of_property_read_string(np, "nvidia,out-parent-clk", &temp_str0)) {
@@ -434,10 +482,13 @@ static int parse_sd_settings(struct device_node *np,
 	int sd_index = 0;
 	u32 temp;
 
-	if (of_device_is_available(np))
+	if (of_device_is_available(np)) {
 		sd_settings->enable = (unsigned) 1;
-	else
+		sd_settings->enable_int = (unsigned) 1;
+	} else {
 		sd_settings->enable = (unsigned) 0;
+		sd_settings->enable_int = (unsigned) 0;
+	}
 
 	OF_DC_LOG("nvidia,sd-enable %d\n", sd_settings->enable);
 
@@ -738,7 +789,6 @@ static int parse_cmu_data(struct device_node *np,
 static int parse_fb_info(struct device_node *np, struct tegra_fb_data *fb)
 {
 	u32 temp;
-	const char *temp_str0;
 
 	/*
 	 * set fb->win to 0 in default
@@ -751,15 +801,19 @@ static int parse_fb_info(struct device_node *np, struct tegra_fb_data *fb)
 	} else {
 		goto fail_fb_info;
 	}
-	if (!of_property_read_string(np, "nvidia,fb-flags", &temp_str0)) {
-		if (!strncmp(temp_str0, "flip_on_probe", strlen(temp_str0))) {
-			fb->flags = TEGRA_FB_FLIP_ON_PROBE;
+
+	if (!of_property_read_u32(np, "nvidia,fb-flags", &temp)) {
+		if (temp == TEGRA_FB_FLIP_ON_PROBE)
 			OF_DC_LOG("fb flip on probe\n");
-		} else {
+		else if (temp == 0)
+			OF_DC_LOG("do not flip fb on probe time\n");
+		else {
 			pr_err("invalid fb_flags\n");
 			return -EINVAL;
 		}
+		fb->flags = (unsigned long)temp;
 	}
+
 	if (!of_property_read_u32(np, "nvidia,fb-xres", &temp)) {
 		fb->xres = (int)temp;
 		OF_DC_LOG("fb xres %d\n", fb->xres);
@@ -806,7 +860,9 @@ struct tegra_dsi_cmd *tegra_dsi_parse_cmd_dt(struct platform_device *ndev,
 
 	for (cnt  = 0; cnt < n_cmd; cnt++, temp++) {
 		temp->cmd_type = be32_to_cpu(*prop_val_ptr++);
-		if (temp->cmd_type == TEGRA_DSI_PACKET_CMD) {
+		if ((temp->cmd_type == TEGRA_DSI_PACKET_CMD) ||
+			(temp->cmd_type ==
+			TEGRA_DSI_PACKET_VIDEO_VBLANK_CMD)) {
 			temp->data_id = be32_to_cpu(*prop_val_ptr++);
 			arg1 = be32_to_cpu(*prop_val_ptr++);
 			arg2 = be32_to_cpu(*prop_val_ptr++);
@@ -830,6 +886,9 @@ struct tegra_dsi_cmd *tegra_dsi_parse_cmd_dt(struct platform_device *ndev,
 			}
 		} else if (temp->cmd_type == TEGRA_DSI_DELAY_MS) {
 			temp->sp_len_dly.delay_ms =
+				be32_to_cpu(*prop_val_ptr++);
+		} else if (temp->cmd_type == TEGRA_DSI_SEND_FRAME) {
+			temp->sp_len_dly.frame_cnt =
 				be32_to_cpu(*prop_val_ptr++);
 		}
 	}
@@ -901,6 +960,7 @@ int parse_dsi_settings(struct platform_device *ndev,
 	u32 temp;
 	int err = 0;
 	int dsi_te_gpio = 0;
+	int bl_name_len = 0;
 	struct device_node *np_panel;
 	struct tegra_dsi_out *dsi = pdata->default_out->dsi;
 
@@ -972,6 +1032,12 @@ int parse_dsi_settings(struct platform_device *ndev,
 		OF_DC_LOG("dsi refresh rate %d\n", dsi->refresh_rate);
 	}
 	if (!of_property_read_u32(np_panel,
+			"nvidia,dsi-rated-refresh-rate", &temp)) {
+		dsi->rated_refresh_rate = (u8)temp;
+		OF_DC_LOG("dsi rated refresh rate %d\n",
+				dsi->rated_refresh_rate);
+	}
+	if (!of_property_read_u32(np_panel,
 			"nvidia,dsi-virtual-channel", &temp)) {
 		dsi->virtual_channel = (u8)temp;
 		if (temp == TEGRA_DSI_VIRTUAL_CHANNEL_0)
@@ -1002,6 +1068,42 @@ int parse_dsi_settings(struct platform_device *ndev,
 		dsi->panel_reset = (u8)temp;
 		OF_DC_LOG("dsi panel reset %d\n", dsi->panel_reset);
 	}
+	if (!of_property_read_u32(np_panel,
+				"nvidia,dsi-te-polarity-low", &temp)) {
+		dsi->te_polarity_low = (u8)temp;
+		OF_DC_LOG("dsi panel te polarity low %d\n",
+			dsi->te_polarity_low);
+	}
+	if (!of_property_read_u32(np_panel,
+				"nvidia,dsi-power-saving-suspend", &temp)) {
+		dsi->power_saving_suspend = (u8)temp;
+		OF_DC_LOG("dsi panel power saving suspend %d\n",
+				dsi->power_saving_suspend);
+	}
+	if (!of_property_read_u32(np_panel,
+				"nvidia,dsi-lp00-pre-panel-wakeup", &temp)) {
+		dsi->lp00_pre_panel_wakeup = (u8)temp;
+		OF_DC_LOG("dsi panel lp00 pre panel wakeup %d\n",
+				dsi->lp00_pre_panel_wakeup);
+	}
+	if (!of_property_read_u32(np_panel,
+				"nvidia,dsi-ulpm-not-supported", &temp)) {
+		dsi->ulpm_not_supported = (u8)temp;
+		OF_DC_LOG("dsi panel ulpm not supported %d\n",
+				dsi->ulpm_not_supported);
+	}
+	if (of_find_property(np_panel, "nvidia,dsi-bl-name", &bl_name_len)) {
+		dsi->bl_name = devm_kzalloc(&ndev->dev,
+				sizeof(u8) * bl_name_len, GFP_KERNEL);
+		if (!of_property_read_string(np_panel,
+				"nvidia,dsi-bl-name",
+				(const char **)&dsi->bl_name))
+			OF_DC_LOG("dsi panel bl name %s\n", dsi->bl_name);
+		else {
+			pr_err("dsi error parsing bl name\n");
+			kfree(dsi->bl_name);
+		}
+	}
 
 	if (!of_property_read_u32(np_panel, "nvidia,dsi-ganged-type", &temp)) {
 		dsi->ganged_type = (u8)temp;
@@ -1019,6 +1121,12 @@ int parse_dsi_settings(struct platform_device *ndev,
 		dsi->power_saving_suspend = (bool)temp;
 		OF_DC_LOG("dsi power saving suspend %d\n",
 			dsi->power_saving_suspend);
+	}
+	if (!of_property_read_u32(np_panel,
+		"nvidia,dsi-ulpm-not-support", &temp)) {
+		dsi->ulpm_not_supported = (bool)temp;
+		OF_DC_LOG("dsi ulpm_not_supported %d\n",
+			dsi->ulpm_not_supported);
 	}
 	if (!of_property_read_u32(np_panel,
 		"nvidia,dsi-video-data-type", &temp)) {
@@ -1216,6 +1324,30 @@ int parse_dsi_settings(struct platform_device *ndev,
 			dsi->phy_timing.t_tago_ns);
 	}
 
+	if (!of_find_property(np_panel, "nvidia,dsi-boardinfo", NULL)) {
+		of_property_read_u32_index(np_panel,
+			"nvidia,dsi-boardinfo", 0,
+			&dsi->boardinfo.platform_boardid);
+		of_property_read_u32_index(np_panel,
+			"nvidia,dsi-boardinfo", 1,
+			&dsi->boardinfo.platform_boardversion);
+		of_property_read_u32_index(np_panel,
+			"nvidia,dsi-boardinfo", 2,
+			&dsi->boardinfo.display_boardid);
+		of_property_read_u32_index(np_panel,
+			"nvidia,dsi-boardinfo", 3,
+			&dsi->boardinfo.display_boardversion);
+
+		OF_DC_LOG("boardinfo platform_boardid = %d \
+					 platform_boardversion = %d \
+					 display_boardid = %d \
+					 display_boardversion = %d\n",
+					 dsi->boardinfo.platform_boardid,
+					 dsi->boardinfo.platform_boardversion,
+					 dsi->boardinfo.display_boardid,
+					 dsi->boardinfo.display_boardversion);
+	}
+
 	return 0;
 }
 
@@ -1352,7 +1484,6 @@ struct tegra_dc_platform_data
 #ifdef CONFIG_TEGRA_DC_CMU
 	struct device_node *cmu_np = NULL;
 #endif
-	const char *temp_str0;
 	int err;
 	u32 temp;
 
@@ -1598,12 +1729,17 @@ struct tegra_dc_platform_data
 			goto fail_parse;
 	}
 
-	if (!of_property_read_string(np, "nvidia,dc-flags", &temp_str0)) {
-		if (!strncmp(temp_str0, "dc_flag_en", strlen(temp_str0))) {
-			pdata->flags = TEGRA_DC_FLAG_ENABLED;
-			OF_DC_LOG("dc flag en\n");
+	if (!of_property_read_u32(np, "nvidia,dc-flags", &temp)) {
+		if ((temp != TEGRA_DC_FLAG_ENABLED) &&
+			(temp != 0)) {
+			pr_err("%s: invalid dc platform data flag\n",
+				__func__);
+			goto fail_parse;
 		}
+		pdata->flags = (unsigned long)temp;
+		OF_DC_LOG("dc flag %lu\n", pdata->flags);
 	}
+
 	if (!of_property_read_u32(np, "nvidia,emc-clk-rate", &temp)) {
 		pdata->emc_clk_rate = (unsigned long)temp;
 		OF_DC_LOG("emc clk rate %lu\n", pdata->emc_clk_rate);

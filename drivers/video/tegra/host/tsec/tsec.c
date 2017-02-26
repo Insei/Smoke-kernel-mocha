@@ -30,8 +30,10 @@
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
+#include <linux/dma-mapping.h>
 
 #include <mach/pm_domains.h>
+#include <mach/hardware.h>
 
 #include "dev.h"
 #include "tsec.h"
@@ -39,7 +41,6 @@
 #include "bus_client.h"
 #include "nvhost_acm.h"
 #include "chip_support.h"
-#include "nvhost_memmgr.h"
 #include "nvhost_intr.h"
 #include "t114/t114.h"
 #include "t148/t148.h"
@@ -86,7 +87,7 @@ static char *tsec_get_fw_name(struct platform_device *dev)
 		return NULL;
 	}
 
-	dev_info(&dev->dev, "fw name:%s\n", fw_name);
+	dev_dbg(&dev->dev, "fw name:%s\n", fw_name);
 
 	return fw_name;
 }
@@ -155,6 +156,9 @@ static int tsec_load_kfuse(struct platform_device *pdev)
 	u32 val;
 	u32 timeout;
 
+	if (tegra_platform_is_linsim())
+		return 0;
+
 	val = host1x_readl(pdev, tsec_tegra_ctl_r());
 	val &= ~tsec_tegra_ctl_tkfi_kfuse_m();
 	host1x_writel(pdev, tsec_tegra_ctl_r(), val);
@@ -185,6 +189,27 @@ static int tsec_load_kfuse(struct platform_device *pdev)
 		return -1;
 }
 
+static int tsec_wait_mem_scrubbing(struct platform_device *dev)
+{
+	int retries = TSEC_IDLE_TIMEOUT_DEFAULT / TSEC_IDLE_CHECK_PERIOD;
+	nvhost_dbg_fn("");
+
+	do {
+		u32 w = host1x_readl(dev, tsec_dmactl_r()) &
+			(tsec_dmactl_dmem_scrubbing_m() |
+			 tsec_dmactl_imem_scrubbing_m());
+
+		if (!w) {
+			nvhost_dbg_fn("done");
+			return 0;
+		}
+		udelay(TSEC_IDLE_CHECK_PERIOD);
+	} while (--retries || !tegra_platform_is_silicon());
+
+	nvhost_err(&dev->dev, "Falcon mem scrubbing timeout");
+	return -ETIMEDOUT;
+}
+
 int tsec_boot(struct platform_device *dev)
 {
 	u32 timeout;
@@ -197,6 +222,10 @@ int tsec_boot(struct platform_device *dev)
 
 	if (m->is_booted)
 		return 0;
+
+	err = tsec_wait_mem_scrubbing(dev);
+	if (err)
+		return err;
 
 	host1x_writel(dev, tsec_dmactl_r(), 0);
 	host1x_writel(dev, tsec_dmatrfbase_r(),
@@ -397,9 +426,12 @@ clean_up:
 
 int nvhost_tsec_init(struct platform_device *dev)
 {
-	int err = 0;
-	struct tsec *m;
+	struct tsec *m = get_tsec(dev);
 	char *fw_name;
+	int err = 0;
+
+	if (m)
+		return 0;
 
 	fw_name = tsec_get_fw_name(dev);
 	if (!fw_name) {
@@ -425,37 +457,15 @@ int nvhost_tsec_init(struct platform_device *dev)
 		goto clean_up;
 	}
 
-	nvhost_module_busy(dev);
-
-	err = tsec_boot(dev);
-	if (err)
-		goto clean_up;
-
-	nvhost_module_idle(dev);
 	return 0;
 
 clean_up:
 	dev_err(&dev->dev, "failed");
-	return err;
-}
 
-void nvhost_tsec_deinit(struct platform_device *dev)
-{
-	struct tsec *m = get_tsec(dev);
-
-	DEFINE_DMA_ATTRS(attrs);
-	dma_set_attr(DMA_ATTR_READ_ONLY, &attrs);
-
-	if (m->mapped) {
-		dma_free_attrs(&dev->dev,
-			m->size, m->mapped,
-			m->dma_addr, &attrs);
-		m->mapped = NULL;
-		m->dma_addr = 0;
-	}
-
-	kfree(m);
 	set_tsec(dev, NULL);
+	kfree(m);
+
+	return err;
 }
 
 int nvhost_tsec_finalize_poweron(struct platform_device *dev)
@@ -530,6 +540,7 @@ static int tsec_probe(struct platform_device *dev)
 				(u32 *)&tsec_carveout_size);
 		if (!err) {
 			dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
+			dma_set_attr(DMA_ATTR_SKIP_IOVA_GAP, &attrs);
 			dma_map_linear_attrs(&dev->dev, tsec_carveout_addr,
 				tsec_carveout_size, DMA_TO_DEVICE, &attrs);
 		}

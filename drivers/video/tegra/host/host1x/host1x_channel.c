@@ -3,7 +3,7 @@
  *
  * Tegra Graphics Host Channel
  *
- * Copyright (c) 2010-2013, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2010-2014, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -31,6 +31,7 @@
 #include "nvhost_hwctx.h"
 #include "nvhost_intr.h"
 #include "class_ids.h"
+#include "debug.h"
 
 static void sync_waitbases(struct nvhost_channel *ch, u32 syncpt_val)
 {
@@ -116,6 +117,8 @@ static void submit_ctxsave(struct nvhost_job *job, struct nvhost_hwctx *cur_ctx)
 
 static void add_sync_waits(struct nvhost_channel *ch, int fd)
 {
+	struct nvhost_master *host = nvhost_get_host(ch->dev);
+	struct nvhost_syncpt *sp = &host->syncpt;
 	struct sync_fence *fence;
 	struct sync_pt *_pt;
 	struct nvhost_sync_pt *pt;
@@ -145,6 +148,9 @@ static void add_sync_waits(struct nvhost_channel *ch, int fd)
 		pt = to_nvhost_sync_pt(_pt);
 		id = nvhost_sync_pt_id(pt);
 		thresh = nvhost_sync_pt_thresh(pt);
+
+		if (nvhost_syncpt_is_expired(sp, id, thresh))
+			continue;
 
 		nvhost_cdma_push(&ch->cdma,
 			nvhost_opcode_setclass(NV_HOST1X_CLASS_ID,
@@ -233,12 +239,15 @@ static void submit_gathers(struct nvhost_job *job)
 {
 	u32 class_id = 0;
 	int i;
+	void *cpuva = NULL;
 
 	/* push user gathers */
 	for (i = 0 ; i < job->num_gathers; i++) {
 		struct nvhost_job_gather *g = &job->gathers[i];
 		u32 op1;
 		u32 op2;
+
+		add_sync_waits(job->ch, g->pre_fence);
 
 		if (g->class_id != class_id) {
 			nvhost_cdma_push(&job->ch->cdma,
@@ -247,7 +256,6 @@ static void submit_gathers(struct nvhost_job *job)
 			class_id = g->class_id;
 		}
 
-		add_sync_waits(job->ch, g->pre_fence);
 		/* If register is specified, add a gather with incr/nonincr.
 		 * This allows writing large amounts of data directly from
 		 * memory to a register. */
@@ -259,11 +267,16 @@ static void submit_gathers(struct nvhost_job *job)
 		else
 			op1 = nvhost_opcode_gather(g->words);
 		op2 = job->gathers[i].mem_base + g->offset;
+
+		if (nvhost_debug_trace_cmdbuf)
+			cpuva = dma_buf_vmap(g->buf);
 		nvhost_cdma_push_gather(&job->ch->cdma,
-				job->memmgr,
-				g->ref,
+				cpuva,
+				job->gathers[i].mem_base,
 				g->offset,
 				op1, op2);
+		if (cpuva)
+			dma_buf_vunmap(g->buf, cpuva);
 	}
 }
 
@@ -410,8 +423,7 @@ static int host1x_save_context(struct nvhost_channel *ch)
 		goto done;
 	}
 
-	job = nvhost_job_alloc(ch, hwctx_to_save, 0, 0, 0, 1,
-			nvhost_get_host(ch->dev)->memmgr);
+	job = nvhost_job_alloc(ch, hwctx_to_save, 0, 0, 0, 1);
 	if (!job) {
 		err = -ENOMEM;
 		mutex_unlock(&ch->submitlock);
@@ -493,13 +505,12 @@ static inline int hwctx_handler_init(struct nvhost_channel *ch)
 }
 
 static int host1x_channel_init(struct nvhost_channel *ch,
-	struct nvhost_master *dev, int index)
+	struct nvhost_master *dev)
 {
-	ch->chid = index;
 	mutex_init(&ch->reflock);
 	mutex_init(&ch->submitlock);
 
-	ch->aperture = host1x_channel_aperture(dev->aperture, index);
+	ch->aperture = host1x_channel_aperture(dev->aperture, ch->chid);
 
 	return hwctx_handler_init(ch);
 }

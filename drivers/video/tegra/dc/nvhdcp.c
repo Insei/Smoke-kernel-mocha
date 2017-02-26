@@ -136,6 +136,10 @@ static int nvhdcp_i2c_read(struct tegra_nvhdcp *nvhdcp, u8 reg,
 	};
 
 	do {
+		if (!nvhdcp->hdmi->hpd_switch.state) {
+			nvhdcp_err("hdmi hpd disconnect\n");
+			return -EIO;
+		}
 		if (!nvhdcp_is_plugged(nvhdcp)) {
 			nvhdcp_err("disconnect during i2c xfer\n");
 			return -EIO;
@@ -748,6 +752,10 @@ static int verify_link(struct tegra_nvhdcp *nvhdcp, bool wait_ri)
 	tx = 0;
 	/* retry 3 times to deal with I2C link issues */
 	do {
+		if (!hdmi->hpd_switch.state) {
+			nvhdcp_err("hdmi hpd disconnect\n");
+			return -EIO;
+		}
 		if (wait_ri)
 			old = get_transmitter_ri(hdmi);
 
@@ -859,6 +867,13 @@ static void nvhdcp_downstream_worker(struct work_struct *work)
 
 	nvhdcp_vdbg("%s():started thread %s\n", __func__, nvhdcp->name);
 	tegra_dc_io_start(dc);
+
+	if ((!tegra_is_clk_enabled(dc->clk)) ||
+		(!tegra_powergate_is_powered(dc->powergate_id))) {
+		nvhdcp_err("%s, dc is  clockgated\n", __func__);
+		tegra_dc_io_end(dc);
+		return;
+	}
 
 	mutex_lock(&nvhdcp->lock);
 	if (nvhdcp->state == STATE_OFF) {
@@ -1084,7 +1099,9 @@ void tegra_nvhdcp_set_plug(struct tegra_nvhdcp *nvhdcp, bool hpd)
 	nvhdcp_debug("hdmi hotplug detected (hpd = %d)\n", hpd);
 
 	if (hpd) {
+		mutex_lock(&nvhdcp->lock);
 		nvhdcp_set_plugged(nvhdcp, true);
+		mutex_unlock(&nvhdcp->lock);
 		tegra_nvhdcp_on(nvhdcp);
 	} else {
 		tegra_nvhdcp_off(nvhdcp);
@@ -1221,6 +1238,9 @@ static const struct file_operations nvhdcp_fops = {
 	.unlocked_ioctl = nvhdcp_dev_ioctl,
 	.open           = nvhdcp_dev_open,
 	.release        = nvhdcp_dev_release,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl   = nvhdcp_dev_ioctl,
+#endif
 };
 
 /* we only support one AP right now, so should only call this once. */

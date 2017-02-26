@@ -4,7 +4,7 @@
  * Copyright (C) 2010 Google, Inc.
  * Author: Erik Gilling <konkers@android.com>
  *
- * Copyright (c) 2010-2013, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2010-2014, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -26,6 +26,7 @@
 #include <linux/vmalloc.h>
 
 #include "edid.h"
+#include "dc_priv.h"
 
 struct tegra_edid_pvt {
 	struct kref			refcnt;
@@ -37,16 +38,6 @@ struct tegra_edid_pvt {
 	u8			        hdmi_vic[7];
 	/* Note: dc_edid must remain the last member */
 	struct tegra_dc_edid		dc_edid;
-};
-
-struct tegra_edid {
-	struct i2c_client	*client;
-	struct i2c_board_info	info;
-	int			bus;
-
-	struct tegra_edid_pvt	*data;
-
-	struct mutex		lock;
 };
 
 #if defined(DEBUG) || defined(CONFIG_DEBUG_FS)
@@ -98,7 +89,7 @@ void tegra_edid_debug_add(struct tegra_edid *edid)
 {
 	char name[] = "edidX";
 
-	snprintf(name, sizeof(name), "edid%1d", edid->bus);
+	snprintf(name, sizeof(name), "edid%1d", edid->dc->ndev->id);
 	debugfs_create_file(name, S_IRUGO, NULL, edid, &tegra_edid_debug_fops);
 }
 #else
@@ -180,7 +171,7 @@ int tegra_edid_read_block(struct tegra_edid *edid, int block, u8 *data)
 		m = &msg[1];
 	}
 
-	status = i2c_transfer(edid->client->adapter, m, msg_len);
+	status = edid->i2c_ops.i2c_transfer(edid->dc, m, msg_len);
 
 	if (status < 0)
 		return status;
@@ -212,8 +203,8 @@ int tegra_edid_parse_ext_block(const u8 *raw, int idx,
 		pr_err("%s: invalid argument\n", __func__);
 		return -EINVAL;
 	}
-
 	edid->support_audio = 0;
+	edid->hdmi_vic_len = 0;
 	ptr = &raw[0];
 
 	/* If CEA 861 block get info for eld struct */
@@ -253,15 +244,19 @@ int tegra_edid_parse_ext_block(const u8 *raw, int idx,
 		switch (code) {
 		case 1:
 		{
-			edid->eld.sad_count = len;
+			int sad_n = edid->eld.sad_count * 3;
+			edid->eld.sad_count += len / 3;
+			pr_debug("%s: incrementing eld.sad_count by %d to %d\n",
+				 __func__, len / 3, edid->eld.sad_count);
 			edid->eld.conn_type = 0x00;
 			edid->eld.support_hdcp = 0x00;
-			for (i = 0; (i < len) && (i < ELD_MAX_SAD); i ++)
-				edid->eld.sad[i] = ptr[i + 1];
+			for (i = 0; (i < len) && (sad_n < ELD_MAX_SAD_BYTES);
+			     i++, sad_n++)
+				edid->eld.sad[sad_n] = ptr[i + 1];
 			len++;
 			ptr += len; /* adding the header */
 			/* Got an audio data block so enable audio */
-			if(basic_audio == true)
+			if (basic_audio == true)
 				edid->eld.spk_alloc = 1;
 			break;
 		}
@@ -573,51 +568,26 @@ int tegra_edid_get_eld(struct tegra_edid *edid, struct tegra_edid_hdmi_eld *eldd
 	return 0;
 }
 
-struct tegra_edid *tegra_edid_create(int bus)
+struct tegra_edid *tegra_edid_create(struct tegra_dc *dc,
+	i2c_transfer_func_t i2c_func)
 {
 	struct tegra_edid *edid;
-	struct i2c_adapter *adapter;
-	int err;
 
 	edid = kzalloc(sizeof(struct tegra_edid), GFP_KERNEL);
 	if (!edid)
 		return ERR_PTR(-ENOMEM);
 
 	mutex_init(&edid->lock);
-	strlcpy(edid->info.type, "tegra_edid", sizeof(edid->info.type));
-	edid->bus = bus;
-	edid->info.addr = 0x50;
-	edid->info.platform_data = edid;
-
-	adapter = i2c_get_adapter(bus);
-	if (!adapter) {
-		pr_err("can't get adpater for bus %d\n", bus);
-		err = -EBUSY;
-		goto free_edid;
-	}
-
-	edid->client = i2c_new_device(adapter, &edid->info);
-	i2c_put_adapter(adapter);
-
-	if (!edid->client) {
-		pr_err("can't create new device\n");
-		err = -EBUSY;
-		goto free_edid;
-	}
+	edid->i2c_ops.i2c_transfer = i2c_func;
+	edid->dc = dc;
 
 	tegra_edid_debug_add(edid);
 
 	return edid;
-
-free_edid:
-	kfree(edid);
-
-	return ERR_PTR(err);
 }
 
 void tegra_edid_destroy(struct tegra_edid *edid)
 {
-	i2c_release_client(edid->client);
 	if (edid->data)
 		kref_put(&edid->data->refcnt, data_release);
 	kfree(edid);
@@ -647,6 +617,21 @@ void tegra_edid_put_data(struct tegra_dc_edid *data)
 
 	kref_put(&pvt->refcnt, data_release);
 }
+
+struct tegra_dc_edid *tegra_dc_get_edid(struct tegra_dc *dc)
+{
+	if (!dc->edid)
+		return ERR_PTR(-ENODEV);
+
+	return tegra_edid_get_data(dc->edid);
+}
+EXPORT_SYMBOL(tegra_dc_get_edid);
+
+void tegra_dc_put_edid(struct tegra_dc_edid *edid)
+{
+	tegra_edid_put_data(edid);
+}
+EXPORT_SYMBOL(tegra_dc_put_edid);
 
 static const struct i2c_device_id tegra_edid_id[] = {
         { "tegra_edid", 0 },

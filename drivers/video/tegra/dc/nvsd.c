@@ -1,7 +1,7 @@
 /*
  * drivers/video/tegra/dc/nvsd.c
  *
- * Copyright (c) 2010-2013, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2010-2014, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -41,6 +41,8 @@ static ssize_t nvsd_settings_store(struct kobject *kobj,
 static ssize_t nvsd_registers_show(struct kobject *kobj,
 	struct kobj_attribute *attr, char *buf);
 
+static int nvsd_is_enabled(struct tegra_dc_sd_settings *settings);
+
 NVSD_ATTR(enable);
 NVSD_ATTR(aggressiveness);
 NVSD_ATTR(phase_in_settings);
@@ -62,6 +64,7 @@ NVSD_ATTR(sd_window_enable);
 NVSD_ATTR(sd_window);
 NVSD_ATTR(soft_clipping_enable);
 NVSD_ATTR(soft_clipping_threshold);
+NVSD_ATTR(soft_clipping_correction);
 NVSD_ATTR(smooth_k_enable);
 NVSD_ATTR(smooth_k_incr);
 NVSD_ATTR(use_vpulse2);
@@ -92,6 +95,7 @@ static struct attribute *nvsd_attrs[] = {
 	NVSD_ATTRS_ENTRY(sd_window),
 	NVSD_ATTRS_ENTRY(soft_clipping_enable),
 	NVSD_ATTRS_ENTRY(soft_clipping_threshold),
+	NVSD_ATTRS_ENTRY(soft_clipping_correction),
 	NVSD_ATTRS_ENTRY(smooth_k_enable),
 	NVSD_ATTRS_ENTRY(smooth_k_incr),
 	NVSD_ATTRS_ENTRY(use_vpulse2),
@@ -109,6 +113,9 @@ static struct kobject *nvsd_kobj;
 static atomic_t *_sd_brightness;
 /* shared boolean for manual K workaround */
 static atomic_t man_k_until_blank = ATOMIC_INIT(0);
+
+static u16 smooth_k_frames_left;
+static u16 smooth_k_duration_frames;
 
 static u8 nvsd_get_bw_idx(struct tegra_dc_sd_settings *settings)
 {
@@ -303,31 +310,6 @@ static void nvsd_cmd_handler(struct tegra_dc_sd_settings *settings,
 	}
 }
 
-static bool nvsd_update_enable(struct tegra_dc_sd_settings *settings,
-	int enable_val)
-{
-
-	if (enable_val != 1 && enable_val != 0)
-		return false;
-
-	if (!settings->cmd && settings->enable != enable_val) {
-		settings->num_phase_in_steps =
-			STEPS_PER_AGG_LVL*settings->aggressiveness;
-		settings->phase_settings_step = enable_val ?
-			0 : settings->num_phase_in_steps;
-	}
-
-	if (settings->enable != enable_val || settings->cmd & DISABLE) {
-		settings->cmd &= ~(ENABLE | DISABLE);
-		if (!settings->enable && enable_val)
-			settings->cmd |= PHASE_IN;
-		settings->cmd |= enable_val ? ENABLE : DISABLE;
-		return true;
-	}
-
-	return false;
-}
-
 static bool nvsd_update_agg(struct tegra_dc_sd_settings *settings, int agg_val)
 {
 	int i;
@@ -353,7 +335,7 @@ static bool nvsd_update_agg(struct tegra_dc_sd_settings *settings, int agg_val)
 	pri_lvl = i;
 	agg_lvl = sd_agg_priorities->agg[i];
 
-	if (settings->phase_in_settings && settings->enable &&
+	if (settings->phase_in_settings && nvsd_is_enabled(settings) &&
 		settings->aggressiveness != agg_lvl) {
 
 		settings->final_agg = agg_lvl;
@@ -379,7 +361,7 @@ void nvsd_init(struct tegra_dc *dc, struct tegra_dc_sd_settings *settings)
 
 	tegra_dc_io_start(dc);
 	/* If SD's not present or disabled, clear the register and return. */
-	if (!settings || settings->enable == 0) {
+	if (!settings || nvsd_is_enabled(settings) == 0) {
 		/* clear the brightness val, too. */
 		if (_sd_brightness)
 			atomic_set(_sd_brightness, 255);
@@ -475,7 +457,7 @@ void nvsd_init(struct tegra_dc *dc, struct tegra_dc_sd_settings *settings)
 	if (!settings->cmd && settings->phase_in_settings) {
 		settings->num_phase_in_steps = STEPS_PER_AGG_LVL *
 			settings->aggressiveness;
-		settings->phase_settings_step = settings->enable ?
+		settings->phase_settings_step = nvsd_is_enabled(settings) ?
 			settings->num_phase_in_steps : 0;
 	}
 
@@ -539,10 +521,26 @@ void nvsd_init(struct tegra_dc *dc, struct tegra_dc_sd_settings *settings)
 	}
 
 	if (settings->smooth_k_enable) {
+		fixed20_12 smooth_k_incr;
+		fixed20_12 num;
+
 		/* Write K incr value */
 		val = SD_SMOOTH_K_INCR(settings->smooth_k_incr);
 		tegra_dc_writel(dc, val, DC_DISP_SD_SMOOTH_K);
 		dev_dbg(&dc->ndev->dev, "  SMOOTH_K: 0x%08x\n", val);
+
+		/* Convert 8.6 fixed-point to 20.12 fixed-point */
+		smooth_k_incr.full = val << 6;
+
+		/* In the BL_TF LUT, raw K is specified in steps of 8 */
+		num.full = dfixed_const(8);
+
+		num.full = dfixed_div(num, smooth_k_incr);
+		num.full = dfixed_ceil(num);
+		smooth_k_frames_left = dfixed_trunc(num);
+		smooth_k_duration_frames = smooth_k_frames_left;
+		dev_dbg(&dc->ndev->dev, "  Smooth K duration (frames): %d\n",
+			smooth_k_frames_left);
 	}
 #endif
 
@@ -646,7 +644,7 @@ static int nvsd_set_brightness(struct tegra_dc *dc)
 	fixed20_12 nonhisto_gain;	/* gain of pixels not in histogram */
 	fixed20_12 est_achieved_gain;	/* final gain of pixels */
 	fixed20_12 histo_gain = dfixed_init(0);	/* gain of pixels */
-	fixed20_12 k, threshold;
+	fixed20_12 k, threshold;	/* k is the fractional part of HW_K */
 	fixed20_12 den, num, out;
 	fixed20_12 pix_avg, pix_avg_softclip;
 
@@ -658,13 +656,15 @@ static int nvsd_set_brightness(struct tegra_dc *dc)
 	}
 
 	val = tegra_dc_readl(dc, DC_DISP_SD_HW_K_VALUES);
-	k.full = SD_HW_K_R(val) << 2;
+	k.full = dfixed_const(SD_HW_K_R(val));
+	den.full = dfixed_const(1024);
+	k.full = dfixed_div(k, den);
 
 	val = tegra_dc_readl(dc, DC_DISP_SD_SOFT_CLIPPING);
 	threshold.full = dfixed_const(SD_SOFT_CLIPPING_THRESHOLD(val));
 
 	val = tegra_dc_readl(dc, DC_DISP_SD_CONTROL);
-	bin_width = SD_BIN_WIDTH(val)>>3;
+	bin_width = SD_BIN_WIDTH_VAL(val);
 	incr = 1 << bin_width;
 	base = 256 - 32 * incr;
 
@@ -706,6 +706,7 @@ bool nvsd_update_brightness(struct tegra_dc *dc)
 	int cur_sd_brightness;
 	int sw_sd_brightness;
 	struct tegra_dc_sd_settings *settings = dc->out->sd_settings;
+	bool nvsd_updated = false;
 
 	if (_sd_brightness) {
 		if (atomic_read(&man_k_until_blank) &&
@@ -720,7 +721,7 @@ bool nvsd_update_brightness(struct tegra_dc *dc)
 			nvsd_cmd_handler(settings, dc);
 
 		/* nvsd_cmd_handler may turn off didim */
-		if (!settings->enable)
+		if (!nvsd_is_enabled(settings))
 			return true;
 
 		cur_sd_brightness = atomic_read(_sd_brightness);
@@ -733,19 +734,31 @@ bool nvsd_update_brightness(struct tegra_dc *dc)
 		 * compensated according to histogram for soft-clipping
 		 * if hw output is used to update brightness. */
 		if (settings->phase_in_adjustments) {
-			return nvsd_phase_in_adjustments(dc, settings);
-		} else if (settings->soft_clipping_correction) {
+			nvsd_updated = nvsd_phase_in_adjustments(dc, settings);
+		} else if (settings->soft_clipping_enable &&
+			settings->soft_clipping_correction) {
 			sw_sd_brightness = nvsd_set_brightness(dc);
 			if (sw_sd_brightness != cur_sd_brightness) {
 				atomic_set(_sd_brightness, sw_sd_brightness);
-				return true;
+				nvsd_updated = true;
 			}
 		} else if (val != (u32)cur_sd_brightness) {
 			/* set brightness value and note the update */
 			atomic_set(_sd_brightness, (int)val);
+			nvsd_updated = true;
+		}
+
+		if (nvsd_updated) {
+			smooth_k_frames_left = smooth_k_duration_frames;
 			return true;
 		}
 
+		if (settings->smooth_k_enable) {
+			if (smooth_k_frames_left--)
+				return true;
+			else
+				smooth_k_frames_left = smooth_k_duration_frames;
+		}
 	}
 
 	/* No update needed. */
@@ -872,6 +885,9 @@ static ssize_t nvsd_settings_show(struct kobject *kobj,
 		else if (IS_NVSD_ATTR(soft_clipping_threshold))
 			res = snprintf(buf, PAGE_SIZE, "%d\n",
 				sd_settings->soft_clipping_threshold);
+		else if (IS_NVSD_ATTR(soft_clipping_correction))
+			res = snprintf(buf, PAGE_SIZE, "%d\n",
+				sd_settings->soft_clipping_correction);
 		else if (IS_NVSD_ATTR(smooth_k_enable))
 			res = snprintf(buf, PAGE_SIZE, "%d\n",
 				sd_settings->smooth_k_enable);
@@ -986,17 +1002,7 @@ static ssize_t nvsd_settings_store(struct kobject *kobj,
 
 	if (sd_settings) {
 		if (IS_NVSD_ATTR(enable)) {
-			if (sd_settings->phase_in_settings) {
-				err = strict_strtol(buf, 10, &result);
-				if (err)
-					return err;
-
-				if (nvsd_update_enable(sd_settings, result))
-					nvsd_check_and_update(1, 1, enable);
-
-			} else {
 				nvsd_check_and_update(0, 1, enable);
-			}
 		} else if (IS_NVSD_ATTR(aggressiveness)) {
 			err = strict_strtol(buf, 10, &result);
 			if (err)
@@ -1011,7 +1017,7 @@ static ssize_t nvsd_settings_store(struct kobject *kobj,
 		} else if (IS_NVSD_ATTR(phase_in_adjustments)) {
 			nvsd_check_and_update(0, 1, phase_in_adjustments);
 		} else if (IS_NVSD_ATTR(bin_width)) {
-			nvsd_check_and_update(0, 8, bin_width);
+			nvsd_check_and_update(-1, 8, bin_width);
 		} else if (IS_NVSD_ATTR(hw_update_delay)) {
 			nvsd_check_and_update(0, 2, hw_update_delay);
 		} else if (IS_NVSD_ATTR(use_vid_luma)) {
@@ -1060,6 +1066,8 @@ static ssize_t nvsd_settings_store(struct kobject *kobj,
 			nvsd_check_and_update(0, 1, soft_clipping_enable);
 		} else if (IS_NVSD_ATTR(soft_clipping_threshold)) {
 			nvsd_check_and_update(0, 255, soft_clipping_threshold);
+		} else if (IS_NVSD_ATTR(soft_clipping_correction)) {
+			nvsd_check_and_update(0, 1, soft_clipping_correction);
 		} else if (IS_NVSD_ATTR(smooth_k_enable)) {
 			nvsd_check_and_update(0, 1, smooth_k_enable);
 		} else if (IS_NVSD_ATTR(smooth_k_incr)) {
@@ -1096,7 +1104,7 @@ static ssize_t nvsd_settings_store(struct kobject *kobj,
 			mutex_unlock(&dc->lock);
 
 			/* Update backlight state IFF we're disabling! */
-			if (!sd_settings->enable && sd_settings->bl_device) {
+			if (!nvsd_is_enabled(sd_settings) && sd_settings->bl_device) {
 				/* Do the actual brightness update outside of
 				 * the mutex */
 				struct backlight_device *bl =
@@ -1200,3 +1208,33 @@ void nvsd_remove_sysfs(struct device *dev)
 		kobject_put(nvsd_kobj);
 	}
 }
+
+static int nvsd_is_enabled(struct tegra_dc_sd_settings *settings)
+{
+	return (settings->enable && settings->enable_int);
+}
+
+/*wrapper function used for disabling/enabling prism*/
+void nvsd_enbl_dsbl_prism(struct device *dev, bool status)
+{
+	bool last_status;
+	struct tegra_dc_sd_settings *settings;
+	struct platform_device *ndev = to_platform_device(dev);
+	struct tegra_dc *dc = platform_get_drvdata(ndev);
+	if (!dc)
+		return;
+
+	settings = dc->out->sd_settings;
+	if (!settings)
+		return;
+
+	last_status = nvsd_is_enabled(settings);
+	settings->enable_int = status;
+	if (nvsd_is_enabled(settings) == last_status)
+		return;
+
+	nvsd_init(dc, settings);
+
+	return;
+}
+EXPORT_SYMBOL(nvsd_enbl_dsbl_prism);

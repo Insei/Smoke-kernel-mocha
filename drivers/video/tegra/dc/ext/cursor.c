@@ -1,7 +1,7 @@
 /*
  * drivers/video/tegra/dc/ext/cursor.c
  *
- * Copyright (c) 2011-2013, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2011-2014, NVIDIA CORPORATION, All rights reserved.
  *
  * Author: Robert Morell <rmorell@nvidia.com>
  *
@@ -82,18 +82,16 @@ static unsigned int set_cursor_start_addr(struct tegra_dc *dc,
 	/* Get the cursor clip window number */
 	clip_win = CURSOR_CLIP_GET_WINDOW(tegra_dc_readl(dc,
 					  DC_DISP_CURSOR_START_ADDR));
-	val |= clip_win;
-#if defined(CONFIG_TEGRA_DC_64BIT_SUPPORT)
-	/* TO DO: check calculation with HW */
-	tegra_dc_writel(dc,
-		(u32)(CURSOR_START_ADDR_HI(phys_addr)),
-		DC_DISP_CURSOR_START_ADDR_HI);
-	tegra_dc_writel(dc, (u32)(val |
-			CURSOR_START_ADDR_LOW(phys_addr)),
+	val |= CURSOR_CLIP_SHIFT_BITS(clip_win);
+#if defined(CONFIG_ARCH_TEGRA_2x_SOC) || defined(CONFIG_ARCH_TEGRA_3x_SOC) || \
+	defined(CONFIG_ARCH_TEGRA_11x_SOC) || defined(CONFIG_ARCH_TEGRA_14x_SOC)
+	tegra_dc_writel(dc, val | CURSOR_START_ADDR(((unsigned long)phys_addr)),
 		DC_DISP_CURSOR_START_ADDR);
 #else
-	tegra_dc_writel(dc,
-		val | CURSOR_START_ADDR(((unsigned long) phys_addr)),
+	/* TO DO: check calculation with HW */
+	tegra_dc_writel(dc, (u32)(CURSOR_START_ADDR_HI(phys_addr)),
+		DC_DISP_CURSOR_START_ADDR_HI);
+	tegra_dc_writel(dc, (u32)(val | CURSOR_START_ADDR_LOW(phys_addr)),
 		DC_DISP_CURSOR_START_ADDR);
 #endif
 
@@ -231,9 +229,6 @@ int tegra_dc_ext_set_cursor_image(struct tegra_dc_ext_user *user,
 	int ret;
 	int need_general_update = 0;
 	u32 format = TEGRA_DC_EXT_CURSOR_FORMAT_FLAGS(args->flags);
-
-	if (!user->nvmap)
-		return -EFAULT;
 
 	size = TEGRA_DC_EXT_CURSOR_IMAGE_FLAGS_SIZE(args->flags);
 
@@ -395,6 +390,14 @@ int tegra_dc_ext_cursor_clip(struct tegra_dc_ext_user *user,
 	tegra_dc_writel(dc, reg_val | CURSOR_CLIP_SHIFT_BITS(*args),
 			DC_DISP_CURSOR_START_ADDR);
 
+#if defined(CONFIG_ARCH_TEGRA_12x_SOC)
+	tegra_dc_writel(dc, CURSOR_UPDATE, DC_CMD_STATE_CONTROL);
+	tegra_dc_writel(dc, CURSOR_ACT_REQ, DC_CMD_STATE_CONTROL);
+#else
+	tegra_dc_writel(dc, GENERAL_UPDATE, DC_CMD_STATE_CONTROL);
+	tegra_dc_writel(dc, GENERAL_ACT_REQ, DC_CMD_STATE_CONTROL);
+#endif
+
 	tegra_dc_put(dc);
 	mutex_unlock(&dc->lock);
 
@@ -464,9 +467,6 @@ int tegra_dc_ext_set_cursor_low_latency(struct tegra_dc_ext_user *user,
 	dma_addr_t phys_addr;
 	bool enable = !!(args->vis & TEGRA_DC_EXT_CURSOR_FLAGS_VISIBLE);
 	int need_general_update = 0;
-
-	if (!user->nvmap)
-		return -EFAULT;
 
 	size = TEGRA_DC_EXT_CURSOR_IMAGE_FLAGS_SIZE(args->flags);
 

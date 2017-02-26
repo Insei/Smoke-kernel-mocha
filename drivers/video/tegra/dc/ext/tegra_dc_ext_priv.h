@@ -1,7 +1,7 @@
 /*
  * drivers/video/tegra/dc/ext/tegra_dc_ext_priv.h
  *
- * Copyright (c) 2011-2013, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2011-2014, NVIDIA CORPORATION, All rights reserved.
  *
  * Author: Robert Morell <rmorell@nvidia.com>
  *
@@ -20,12 +20,12 @@
 #define __TEGRA_DC_EXT_PRIV_H
 
 #include <linux/cdev.h>
+#include <linux/dma-buf.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/poll.h>
 
 #include <mach/dc.h>
-#include <linux/nvmap.h>
 
 #include <video/tegra_dc_ext.h>
 
@@ -33,7 +33,6 @@ struct tegra_dc_ext;
 
 struct tegra_dc_ext_user {
 	struct tegra_dc_ext	*ext;
-	struct nvmap_client	*nvmap;
 };
 
 struct tegra_dc_dmabuf {
@@ -58,7 +57,7 @@ struct tegra_dc_ext_win {
 
 	struct mutex		lock;
 
-	/* Current nvmap handle (if any) for Y, U, V planes */
+	/* Current dmabuf (if any) for Y, U, V planes */
 	struct tegra_dc_dmabuf	*cur_handle[TEGRA_DC_NUM_PLANES];
 
 	struct workqueue_struct	*flip_wq;
@@ -68,6 +67,8 @@ struct tegra_dc_ext_win {
 	struct mutex		queue_lock;
 
 	struct list_head	timestamp_queue;
+
+	bool			enabled;
 };
 
 struct tegra_dc_ext {
@@ -85,13 +86,16 @@ struct tegra_dc_ext {
 	} cursor;
 
 	bool				enabled;
+	bool				vblank_enabled;
 };
 
-#define TEGRA_DC_EXT_EVENT_MASK_ALL \
-	(TEGRA_DC_EXT_EVENT_HOTPLUG | TEGRA_DC_EXT_EVENT_BANDWIDTH_INC | \
+#define TEGRA_DC_EXT_EVENT_MASK_ALL		\
+	(TEGRA_DC_EXT_EVENT_HOTPLUG |		\
+	 TEGRA_DC_EXT_EVENT_VBLANK |		\
+	 TEGRA_DC_EXT_EVENT_BANDWIDTH_INC |	\
 	 TEGRA_DC_EXT_EVENT_BANDWIDTH_DEC)
 
-#define TEGRA_DC_EXT_EVENT_MAX_SZ	8
+#define TEGRA_DC_EXT_EVENT_MAX_SZ	16
 
 struct tegra_dc_ext_event_list {
 	struct tegra_dc_ext_event	event;
@@ -153,6 +157,8 @@ extern int tegra_dc_ext_control_init(void);
 
 extern int tegra_dc_ext_queue_hotplug(struct tegra_dc_ext_control *,
 				      int output);
+extern int tegra_dc_ext_queue_vblank(struct tegra_dc_ext_control *,
+				      int output, ktime_t timestamp);
 extern int tegra_dc_ext_queue_bandwidth_renegotiate(
 			struct tegra_dc_ext_control *, int output,
 			struct tegra_dc_bw_data *data);

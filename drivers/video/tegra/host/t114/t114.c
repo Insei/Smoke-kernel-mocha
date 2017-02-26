@@ -3,7 +3,7 @@
  *
  * Tegra Graphics Init for Tegra11 Architecture Chips
  *
- * Copyright (c) 2011-2013, NVIDIA Corporation. All rights reserved.
+ * Copyright (c) 2011-2014, NVIDIA Corporation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -40,9 +40,7 @@
 #include "host1x/host1x.h"
 #include "chip_support.h"
 #include "nvhost_channel.h"
-#include "nvhost_memmgr.h"
 #include "chip_support.h"
-#include "gr3d/pod_scaling.h"
 #include "class_ids.h"
 
 /* HACK! This needs to come from DT */
@@ -314,7 +312,6 @@ struct nvhost_device_data t11_tsec_info = {
 	.keepalive       = true,
 	.moduleid	= NVHOST_MODULE_TSEC,
 	.init          = nvhost_tsec_init,
-	.deinit        = nvhost_tsec_deinit,
 	.finalize_poweron = nvhost_tsec_finalize_poweron,
 	.prepare_poweroff = nvhost_tsec_prepare_poweroff,
 };
@@ -363,7 +360,6 @@ struct platform_device *tegra11_register_host1x_devices(void)
 #include "host1x/host1x_syncpt.c"
 #include "host1x/host1x_intr.c"
 #include "host1x/host1x_actmon_t114.c"
-#include "host1x/host1x_tickctrl.c"
 
 static void t114_free_nvhost_channel(struct nvhost_channel *ch)
 {
@@ -385,21 +381,15 @@ static struct nvhost_channel *t114_alloc_nvhost_channel(
 int nvhost_init_t114_support(struct nvhost_master *host,
 	struct nvhost_chip_support *op)
 {
-	int err;
-
 	op->cdma = host1x_cdma_ops;
 	op->push_buffer = host1x_pushbuffer_ops;
 	op->debug = host1x_debug_ops;
 	host->sync_aperture = host->aperture + HOST1X_CHANNEL_SYNC_REG_BASE;
 	op->syncpt = host1x_syncpt_ops;
 	op->intr = host1x_intr_ops;
-	err = nvhost_memmgr_init(op);
-	if (err)
-		return err;
 	op->nvhost_dev.alloc_nvhost_channel = t114_alloc_nvhost_channel;
 	op->nvhost_dev.free_nvhost_channel = t114_free_nvhost_channel;
 	op->actmon = host1x_actmon_ops;
-	op->tickctrl = host1x_tickctrl_ops;
 
 	return 0;
 }

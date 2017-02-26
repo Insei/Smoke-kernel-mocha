@@ -4,7 +4,7 @@
  * Copyright (C) 2010 Google, Inc.
  * Author: Erik Gilling <konkers@android.com>
  *
- * Copyright (c) 2010-2013, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2010-2015, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -38,12 +38,13 @@
 
 #include "dc_reg.h"
 
-
 #define NEED_UPDATE_EMC_ON_EVERY_FRAME (windows_idle_detection_time == 0)
 
-/* 29 bit offset for window clip number */
-#define CURSOR_CLIP_SHIFT_BITS(win)	(win << 29)
-#define CURSOR_CLIP_GET_WINDOW(reg)	((reg >> 29) & 3)
+/* 28 bit offset for window clip number */
+#define CURSOR_CLIP_SHIFT_BITS(win)	(win << 28)
+#define CURSOR_CLIP_GET_WINDOW(reg)	((reg >> 28) & 3)
+
+#define BLANK_ALL	(~0)
 
 static inline u32 ALL_UF_INT(void)
 {
@@ -117,6 +118,8 @@ struct tegra_dc_shift_clk_div {
 	unsigned long div; /* denominator */
 };
 
+struct tegra_dc_nvsr_data;
+
 struct tegra_dc {
 	struct platform_device		*ndev;
 	struct tegra_dc_platform_data	*pdata;
@@ -131,6 +134,9 @@ struct tegra_dc {
 #else
 	struct clk			*emc_clk;
 #endif
+#ifdef CONFIG_ARCH_TEGRA_12x_SOC
+	struct clk			*emc_la_clk;
+#endif
 	long				bw_kbps; /* bandwidth in KBps */
 	long				new_bw_kbps;
 	struct tegra_dc_shift_clk_div	shift_clk_div;
@@ -140,6 +146,14 @@ struct tegra_dc {
 	bool				connected;
 	bool				enabled;
 	bool				suspended;
+	bool				blanked;
+
+	/* Some of the setup code could reset display even if
+	 * DC is already by bootloader.  This one-time mark is
+	 * used to suppress such code blocks during system boot,
+	 * a.k.a the call stack above tegra_dc_probe().
+	 */
+	bool				initialized;
 
 	struct tegra_dc_out		*out;
 	struct tegra_dc_out_ops		*out_ops;
@@ -153,13 +167,19 @@ struct tegra_dc {
 	int				n_windows;
 #ifdef CONFIG_TEGRA_DC_CMU
 	struct tegra_dc_cmu		cmu;
+	struct tegra_dc_cmu		cmu_shadow;
+	/* Is CMU set by bootloader */
+	bool				is_cmu_set_bl;
+	bool				cmu_shadow_dirty;
+	bool				cmu_shadow_force_update;
+	bool				cmu_enabled;
 #endif
 	wait_queue_head_t		wq;
 	wait_queue_head_t		timestamp_wq;
 
+	struct mutex			lp_lock;
 	struct mutex			lock;
 	struct mutex			one_shot_lock;
-	struct mutex			one_shot_lp_lock;
 
 	struct resource			*fb_mem;
 	struct tegra_fb_info		*fb;
@@ -188,6 +208,7 @@ struct tegra_dc {
 
 	struct work_struct		vblank_work;
 	long				vblank_ref_count;
+	struct work_struct		frame_end_work;
 	struct work_struct		vpulse2_work;
 	long				vpulse2_ref_count;
 
@@ -219,13 +240,15 @@ struct tegra_dc {
 	atomic_t			frame_end_ref;
 
 	bool				mode_dirty;
+	atomic_t			holding;
 
 	u32				reserved_bw;
 	u32				available_bw;
 	struct tegra_dc_win		tmp_wins[DC_N_WINDOWS];
 
-	int				win_blank_saved_flag;
-	struct tegra_dc_win		win_blank_saved;
+	struct tegra_edid		*edid;
+
+	struct tegra_dc_nvsr_data *nvsr;
 };
 
 #endif

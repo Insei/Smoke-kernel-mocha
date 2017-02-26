@@ -15,25 +15,6 @@ config TEGRA_GRHOST_VI
 	  To compile this driver as a module, choose M here:
 	  the  module will be called nvhost-vi.
 
-config TEGRA_GRHOST_USE_NVMAP
-	bool "Use nvmap as graphics memory manager"
-	default y if TEGRA_NVMAP
-	help
-	  Use nvmap as the graphics memory manager.
-
-config TEGRA_GRHOST_FORCE_NVMAP
-	bool "Use nvmap as graphics memory manager"
-	default n
-	help
-	  Force using nvmap instead of dma mapping API
-
-config TEGRA_GRHOST_USE_DMABUF
-	bool "Support dmabuf buffers"
-	default y
-	select DMA_SHARED_BUFFER
-	help
-	  Support dmabuf buffers.
-
 config TEGRA_GRHOST_DEFAULT_TIMEOUT
 	depends on TEGRA_GRHOST
 	int "Default timeout for submits"
@@ -50,25 +31,18 @@ config TEGRA_GRHOST_SYNC
 	  Add tegra host backend for the cross driver synchronization framework.
 	  Allows creating sync fence file descriptors from Tegra host syncpoints.
 
-config TEGRA_GRHOST_GK20A_PHYS_PAGE_TABLES
-	bool "Use physical addressing for gk20a page tables"
-	default y if TEGRA_SIMULATION_PLATFORM
-	help
-	  Use physical addressing for gk20a page tables. If this is off, we
-	  use SMMU translation.
-
 config TEGRA_DC
 	tristate "Tegra Display Contoller"
-	depends on ARCH_TEGRA && TEGRA_GRHOST
+	depends on ARCH_TEGRA && TEGRA_GRHOST && I2C
 	select BACKLIGHT_CLASS_DEVICE
 	select FB_MODE_HELPERS
-	select I2C
 	help
 	  Tegra display controller support.
 
 config TEGRA_DC_CMU
 	bool
-	default n
+	default n if ARCH_TEGRA_2x_SOC || ARCH_TEGRA_3x_SOC
+	default y
 
 config TEGRA_DC_WIN_H
     bool
@@ -190,6 +164,14 @@ config NVMAP_PAGE_POOLS
 	  when system is low on memory and acquired back during release of
 	  memory.
 
+config NVMAP_PAGE_POOL_DEBUG
+	bool "Debugging for page pools"
+	depends on NVMAP_PAGE_POOLS
+	help
+	  Say Y here to include some debugging info in the page pools. This
+	  adds a bit of unnecessary overhead so only enable this is you
+	  suspect there is an issue with the nvmap page pools.
+
 config NVMAP_PAGE_POOLS_INIT_FILLUP
 	bool "Fill up page pools during page pools init"
 	depends on NVMAP_PAGE_POOLS
@@ -275,23 +257,12 @@ config NVMAP_VPR
 config NVMAP_FORCE_ZEROED_USER_PAGES
 	bool "Only alloc zeroed pages for user space"
 	depends on TEGRA_NVMAP
+	default y
 	help
 	  Say Y here to force zeroing of pages allocated for user space. This
 	  avoids leaking kernel secure data to user space. This can add
 	  significant overhead to allocation operations depending on the
 	  allocation size requested.
-
-config NVMAP_USE_FD_FOR_HANDLE
-	bool "Use Fd's to represent NvMap handles"
-	depends on TEGRA_NVMAP
-	default y
-	help
-	  Say Y here to use Fd's for representing NvMap handles
-	  in user space. Enabling this config returns DmaBuf
-	  compatible Fd's to user space during handle creation
-	  requests. The kernel component that receives these Fd's
-	  can use either NvMap interface or DmaBuf interface in order
-	  to access NvMap handle memory.
 
 config NVMAP_USE_CMA_FOR_CARVEOUT
 	bool "Use CMA memory for carveouts"
@@ -340,6 +311,12 @@ config TEGRA_LVDS
 	help
 	  Say Y here to enable LVDS panel.
 
+config TEGRA_NVSR
+	bool "Enable NVSR support."
+	default  n
+	help
+	   Say Y here to enable NVSR support.
+
 config NVMAP_CONVERT_CARVEOUT_TO_IOVMM
 	bool "Convert carveout to IOVMM"
 	depends on TEGRA_NVMAP && IOMMU_API
@@ -371,47 +348,6 @@ config TEGRA_HDMI_74MHZ_LIMIT
 	help
 	  Say Y here to make kernel report only low bandwidth modes.
 	  Useful only for boards which can't deliver 148.50 MHz.
-
-config TEGRA_GK20A_PMU
-	bool "Support GK20A PMU"
-	depends on TEGRA_GK20A
-	default n
-	help
-	  Say Y here to enable GK20A PMU features.
-
-choice
-	depends on TEGRA_GK20A
-	prompt "Enable GK20A frequency scaling"
-	default TEGRA_GK20A_PERFMON
-	optional
-	help
-		Select this entry to enable gk20a scaling
-
-config TEGRA_GK20A_PERFMON
-	bool "Use Perfmon"
-	help
-	  Select this to enable built-in perfmon scaling.
-	  The built-in scaling option uses simplistic
-	  scaling mechanism (if busy, increase frequency and
-	  decrease frequency if idle).
-
-config TEGRA_GK20A_DEVFREQ
-	bool "Use Devfreq"
-	help
-	  Select this to use devfreq based scaling.
-	  Devfreq is a common framework that allows using
-	  variety of different governors and changing
-	  between governors on the fly. By default, no
-	  governor is selected.
-
-endchoice
-
-config TEGRA_GPU_CYCLE_STATS
-	bool "Support GK20A GPU CYCLE STATS"
-	depends on TEGRA_GK20A
-	default y
-	help
-	  Say Y here to enable the cycle stats debugging features.
 
 endif
 

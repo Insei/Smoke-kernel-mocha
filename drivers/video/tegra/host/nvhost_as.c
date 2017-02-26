@@ -3,7 +3,7 @@
  *
  * Tegra Host Address Spaces
  *
- * Copyright (c) 2011-2013, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2011-2014, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -37,18 +37,21 @@ int nvhost_as_dev_open(struct inode *inode, struct file *filp)
 {
 	struct nvhost_as_share *as_share;
 	struct nvhost_channel *ch;
+	struct nvhost_device_data *pdata;
 	int err;
 
 	nvhost_dbg_fn("");
 
 	/* this will come from module, not channel, later */
-	ch = container_of(inode->i_cdev, struct nvhost_channel, as_cdev);
+	pdata = container_of(inode->i_cdev, struct nvhost_device_data, as_cdev);
+
+	ch = pdata->channel;
 	if (!ch->as) {
 		nvhost_dbg_fn("no as for the channel!");
 		return -ENOENT;
 	}
 
-	ch = nvhost_getchannel(ch, false);
+	ch = nvhost_getchannel(ch, false, true);
 	if (!ch) {
 		nvhost_dbg_fn("fail to get channel!");
 		return -ENOMEM;
@@ -70,15 +73,18 @@ int nvhost_as_dev_release(struct inode *inode, struct file *filp)
 {
 	struct nvhost_as_share *as_share = filp->private_data;
 	struct nvhost_channel *ch;
+	struct nvhost_device_data *pdata;
 	int ret;
 
 	nvhost_dbg_fn("");
 
-	ch = container_of(inode->i_cdev, struct nvhost_channel, as_cdev);
+	pdata = container_of(inode->i_cdev, struct nvhost_device_data, as_cdev);
+
+	ch = pdata->channel;
 
 	ret = nvhost_as_release_share(as_share, 0/* no hwctx to release */);
 
-	nvhost_putchannel(ch);
+	nvhost_putchannel(ch, true);
 
 	return ret;
 }
@@ -104,7 +110,9 @@ long nvhost_as_dev_ctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 	}
 
-	nvhost_module_busy(ch->dev);
+	err = nvhost_module_busy(ch->dev);
+	if (err)
+		return err;
 
 	switch (cmd) {
 	case NVHOST_AS_IOCTL_BIND_CHANNEL:
@@ -142,6 +150,11 @@ long nvhost_as_dev_ctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		trace_nvhost_as_ioctl_map_buffer(dev_name(&ch->dev->dev));
 		err = nvhost_as_ioctl_map_buffer(as_share,
 				       (struct nvhost_as_map_buffer_args *)buf);
+		break;
+	case NVHOST_AS_IOCTL_MAP_BUFFER_EX:
+		trace_nvhost_as_ioctl_map_buffer(dev_name(&ch->dev->dev));
+		err = nvhost_as_ioctl_map_buffer_ex(as_share,
+			       (struct nvhost_as_map_buffer_ex_args *)buf);
 		break;
 	case NVHOST_AS_IOCTL_UNMAP_BUFFER:
 		trace_nvhost_as_ioctl_unmap_buffer(dev_name(&ch->dev->dev));
@@ -232,7 +245,7 @@ int nvhost_as_alloc_share(struct nvhost_channel *ch,
 	as_share->ch      = ch;
 	as_share->as      = as;
 	as_share->host    = nvhost_get_host(ch->dev);
-	as_share->as_dev  = ch->as_node;
+	as_share->as_dev  = pdata->as_node;
 	as_share->id      = generate_as_share_id(as_share->as);
 
 	/* call module to allocate hw resources */
@@ -365,6 +378,26 @@ int nvhost_as_ioctl_free_space(struct nvhost_as_share *as_share,
 	return pdata->as_ops->free_space(as_share, args);
 }
 
+int nvhost_as_ioctl_map_buffer_ex(struct nvhost_as_share *as_share,
+				  struct nvhost_as_map_buffer_ex_args *args)
+{
+	struct nvhost_device_data *pdata =
+		nvhost_get_devdata(as_share->ch->dev);
+	int i;
+
+	nvhost_dbg_fn("");
+
+	/* ensure that padding is not set. this is required for ensuring that
+	 * we can safely use these fields later */
+	for (i = 0; i < ARRAY_SIZE(args->padding); i++)
+		if (args->padding[i])
+			return -EINVAL;
+
+	return pdata->as_ops->map_buffer(as_share, 0, args->dmabuf_fd,
+					 &args->offset, args->flags,
+					 args->kind);
+}
+
 int nvhost_as_ioctl_map_buffer(struct nvhost_as_share *as_share,
 			       struct nvhost_as_map_buffer_args *args)
 {
@@ -372,9 +405,9 @@ int nvhost_as_ioctl_map_buffer(struct nvhost_as_share *as_share,
 		nvhost_get_devdata(as_share->ch->dev);
 	nvhost_dbg_fn("");
 
-	return pdata->as_ops->map_buffer(as_share,
-					     args->nvmap_fd, args->nvmap_handle,
-					     &args->o_a.align, args->flags);
+	return pdata->as_ops->map_buffer(as_share, args->nvmap_fd,
+					 args->nvmap_handle, &args->o_a.align,
+					 args->flags, NV_KIND_DEFAULT);
 	/* args->o_a.offset will be set if !err */
 }
 

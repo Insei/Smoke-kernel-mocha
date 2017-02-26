@@ -3,8 +3,7 @@
  *
  * Tegra Graphics Host Syncpoint Integration to linux/sync Framework
  *
- * Copyright (c) 2013, NVIDIA Corporation. All rights reserved.
- * Copyright (C) 2016 XiaoMi, Inc.
+ * Copyright (c) 2013-2014, NVIDIA Corporation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -90,7 +89,11 @@ static int nvhost_sync_pt_set_intr(struct nvhost_sync_pt *pt)
 	/* Get a ref for the interrupt handler, keep host alive. */
 	kref_get(&pt->refcount);
 	pt->has_intr = true;
-	nvhost_module_busy(syncpt_to_dev(pt->obj->sp)->dev);
+	err = nvhost_module_busy(syncpt_to_dev(pt->obj->sp)->dev);
+	if (err) {
+		kref_put(&pt->refcount, nvhost_sync_pt_free_shared);
+		return err;
+	}
 
 	waiter = nvhost_intr_alloc_waiter();
 	err = nvhost_intr_add_action(&(syncpt_to_dev(pt->obj->sp)->intr),
@@ -273,7 +276,7 @@ struct sync_fence *nvhost_sync_fdget(int fd)
 
 		if (timeline->ops != &nvhost_sync_timeline_ops) {
 			sync_fence_put(fence);
-			return ERR_PTR(-EINVAL);
+			return NULL;
 		}
 	}
 
@@ -286,16 +289,7 @@ int nvhost_sync_num_pts(struct sync_fence *fence)
 	struct list_head *pos;
 
 	list_for_each(pos, &fence->pt_list_head) {
-		struct sync_pt *_pt =
-			container_of(pos, struct sync_pt, pt_list);
-		struct nvhost_sync_pt *pt = to_nvhost_sync_pt(_pt);
-		struct nvhost_sync_timeline *obj = pt->obj;
-
-		u32 id = nvhost_sync_pt_id(pt);
-		u32 thresh = nvhost_sync_pt_thresh(pt);
-
-		if (!nvhost_syncpt_is_expired(obj->sp, id, thresh))
-			num++;
+		num++;
 	}
 
 	return num;
@@ -354,6 +348,17 @@ void nvhost_sync_pt_signal(struct nvhost_sync_pt *pt)
 	}
 	sync_timeline_signal(&obj->obj);
 }
+
+int nvhost_sync_fence_set_name(int fence_fd, const char *name)
+{
+	struct sync_fence *fence = nvhost_sync_fdget(fence_fd);
+	if (!fence)
+		return -EINVAL;
+	strlcpy(fence->name, name, sizeof(fence->name));
+	sync_fence_put(fence);
+	return 0;
+}
+EXPORT_SYMBOL(nvhost_sync_fence_set_name);
 
 int nvhost_sync_create_fence(struct nvhost_syncpt *sp,
 		struct nvhost_ctrl_sync_fence_info *pts,

@@ -32,16 +32,16 @@
 #define NVHOST_CHANNEL_LOW_PRIO_MAX_WAIT 50
 
 int nvhost_channel_init(struct nvhost_channel *ch,
-		struct nvhost_master *dev, int index)
+		struct nvhost_master *dev)
 {
 	int err;
 	struct nvhost_device_data *pdata = platform_get_drvdata(ch->dev);
 
 	/* Link platform_device to nvhost_channel */
-	err = channel_op(ch).init(ch, dev, index);
+	err = channel_op(ch).init(ch, dev);
 	if (err < 0) {
 		dev_err(&dev->dev->dev, "failed to init channel %d\n",
-				index);
+				ch->chid);
 		return err;
 	}
 	pdata->channel = ch;
@@ -84,14 +84,16 @@ int nvhost_channel_submit(struct nvhost_job *job)
 }
 
 struct nvhost_channel *nvhost_getchannel(struct nvhost_channel *ch,
-		bool force)
+		bool force, bool init)
 {
 	int err = 0;
 	struct nvhost_device_data *pdata = platform_get_drvdata(ch->dev);
 
 	mutex_lock(&ch->reflock);
 	if (ch->refcount == 0) {
-		if (pdata->init)
+		if (!init)
+			err = -EBUSY;
+		else if (pdata->init)
 			err = pdata->init(ch->dev);
 	} else if (pdata->exclusive && !force)
 		err = -EBUSY;
@@ -108,7 +110,7 @@ struct nvhost_channel *nvhost_getchannel(struct nvhost_channel *ch,
 	return err ? NULL : ch;
 }
 
-void nvhost_putchannel(struct nvhost_channel *ch)
+void nvhost_putchannel(struct nvhost_channel *ch, bool deinit)
 {
 	struct nvhost_device_data *pdata = platform_get_drvdata(ch->dev);
 
@@ -117,7 +119,7 @@ void nvhost_putchannel(struct nvhost_channel *ch)
 		nvhost_module_enable_poweroff(ch->dev);
 
 	mutex_lock(&ch->reflock);
-	if (ch->refcount == 1 && pdata->deinit)
+	if (ch->refcount == 1 && deinit && pdata->deinit)
 		pdata->deinit(ch->dev);
 
 	ch->refcount--;
@@ -147,6 +149,7 @@ struct nvhost_channel *nvhost_alloc_channel_internal(int chindex,
 		if (ch == NULL)
 			return NULL;
 		else {
+			ch->chid = *current_channel_count;
 			(*current_channel_count)++;
 			return ch;
 		}

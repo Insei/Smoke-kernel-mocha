@@ -37,14 +37,10 @@
 #include "t148/t148.h"
 #include "t124/t124.h"
 #include "vi.h"
+#include "vi_irq.h"
 
 #define MAX_DEVID_LENGTH	16
-
-/*
- * MAX_BW = max(VI clock) * 2BPP, in KBps.
- * Here default max VI clock is 420MHz.
- */
-#define VI_DEFAULT_MAX_BW	840000
+#define TEGRA_VI_NAME		"tegra_vi"
 
 static struct of_device_id tegra_vi_of_match[] = {
 #ifdef TEGRA_11X_OR_HIGHER_CONFIG
@@ -65,30 +61,6 @@ static struct of_device_id tegra_vi_of_match[] = {
 static struct i2c_camera_ctrl *i2c_ctrl;
 
 #if defined(CONFIG_TEGRA_ISOMGR)
-static int vi_isomgr_register(struct vi *tegra_vi)
-{
-	int iso_client_id = TEGRA_ISO_CLIENT_VI_0;
-
-	dev_dbg(&tegra_vi->ndev->dev, "%s++\n", __func__);
-
-	if (tegra_vi->ndev->id)
-		iso_client_id = TEGRA_ISO_CLIENT_VI_1;
-
-	/* Register with max possible BW in VI usecases.*/
-	tegra_vi->isomgr_handle = tegra_isomgr_register(iso_client_id,
-					VI_DEFAULT_MAX_BW,
-					NULL,	/* tegra_isomgr_renegotiate */
-					NULL);	/* *priv */
-
-	if (!tegra_vi->isomgr_handle) {
-		dev_err(&tegra_vi->ndev->dev, "%s: unable to register isomgr\n",
-					__func__);
-		return -ENOMEM;
-	}
-
-	return 0;
-}
-
 static int vi_isomgr_unregister(struct vi *tegra_vi)
 {
 	tegra_isomgr_unregister(tegra_vi->isomgr_handle);
@@ -97,6 +69,70 @@ static int vi_isomgr_unregister(struct vi *tegra_vi)
 	return 0;
 }
 #endif
+
+static int vi_out_show(struct seq_file *s, void *unused)
+{
+	struct vi *vi = s->private;
+
+	seq_printf(s, "vi[%d] overflow: %u\n", vi->ndev->id,
+		atomic_read(&(vi->vi_out.overflow)));
+
+	return 0;
+}
+
+static int vi_out_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, vi_out_show, inode->i_private);
+}
+
+static const struct file_operations vi_out_fops = {
+	.open		= vi_out_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static void vi_remove_debugfs(struct vi *vi)
+{
+	debugfs_remove_recursive(vi->debugdir);
+	vi->debugdir = NULL;
+}
+
+static void vi_create_debugfs(struct vi *vi)
+{
+	struct dentry *ret;
+	char tegra_vi_name[20];
+	char debugfs_file_name[20];
+
+
+	snprintf(tegra_vi_name, sizeof(tegra_vi_name),
+			"%s_%u", TEGRA_VI_NAME, vi->ndev->id);
+
+	vi->debugdir = debugfs_create_dir(tegra_vi_name, NULL);
+	if (!vi->debugdir) {
+		dev_err(&vi->ndev->dev,
+			"%s: failed to create %s directory",
+			__func__, tegra_vi_name);
+		goto create_debugfs_fail;
+	}
+
+	snprintf(debugfs_file_name, sizeof(debugfs_file_name),
+			"%s_%u", "vi_out", vi->ndev->id);
+
+	ret = debugfs_create_file(debugfs_file_name, S_IRUGO,
+			vi->debugdir, vi, &vi_out_fops);
+	if (!ret) {
+		dev_err(&vi->ndev->dev,
+		"%s: failed to create %s", __func__, debugfs_file_name);
+		goto create_debugfs_fail;
+	}
+
+	return;
+
+create_debugfs_fail:
+	dev_err(&vi->ndev->dev, "%s: could not create debugfs", __func__);
+	vi_remove_debugfs(vi);
+}
 
 static int vi_probe(struct platform_device *dev)
 {
@@ -111,6 +147,11 @@ static int vi_probe(struct platform_device *dev)
 			pdata = (struct nvhost_device_data *)match->data;
 			dev->dev.platform_data = pdata;
 		}
+
+		/* DT initializes it to -1, use below WAR to set correct value.
+		 * TODO: Once proper fix for dev-id goes in, remove it.
+		 */
+		dev->id = dev->dev.id;
 	} else
 		pdata = (struct nvhost_device_data *)dev->dev.platform_data;
 
@@ -138,11 +179,14 @@ static int vi_probe(struct platform_device *dev)
 
 	tegra_vi->ndev = dev;
 
-#if defined(CONFIG_TEGRA_ISOMGR)
-	err = vi_isomgr_register(tegra_vi);
+	/* call vi_intr_init and stats_work */
+	INIT_WORK(&tegra_vi->stats_work, vi_stats_worker);
+
+	err = vi_intr_init(tegra_vi);
 	if (err)
 		goto vi_probe_fail;
-#endif
+
+	vi_create_debugfs(tegra_vi);
 
 	i2c_ctrl = pdata->private_data;
 	pdata->private_data = tegra_vi;
@@ -151,12 +195,25 @@ static int vi_probe(struct platform_device *dev)
 	if (i2c_ctrl && i2c_ctrl->new_devices)
 		i2c_ctrl->new_devices(dev);
 
+	tegra_vi->reg = regulator_get(&tegra_vi->ndev->dev, "avdd_dsi_csi");
+	if (IS_ERR(tegra_vi->reg)) {
+		err = PTR_ERR(tegra_vi->reg);
+		if (err == -ENODEV)
+			dev_info(&tegra_vi->ndev->dev,
+				"%s: no regulator device\n", __func__);
+		else
+			dev_err(&tegra_vi->ndev->dev,
+				"%s: couldn't get regulator\n", __func__);
+		tegra_vi->reg = NULL;
+		goto camera_i2c_unregister;
+	}
+
 #ifdef CONFIG_TEGRA_CAMERA
 	tegra_vi->camera = tegra_camera_register(dev);
 	if (!tegra_vi->camera) {
 		dev_err(&dev->dev, "%s: can't register tegra_camera\n",
 				__func__);
-		goto camera_i2c_unregister;
+		goto vi_regulator_put;
 	}
 #endif
 
@@ -179,15 +236,15 @@ static int vi_probe(struct platform_device *dev)
 camera_unregister:
 #ifdef CONFIG_TEGRA_CAMERA
 	tegra_camera_unregister(tegra_vi->camera);
-camera_i2c_unregister:
+vi_regulator_put:
 #endif
+	regulator_put(tegra_vi->reg);
+	tegra_vi->reg = NULL;
+
+camera_i2c_unregister:
 	if (i2c_ctrl && i2c_ctrl->remove_devices)
 		i2c_ctrl->remove_devices(dev);
 	pdata->private_data = i2c_ctrl;
-#if defined(CONFIG_TEGRA_ISOMGR)
-	if (tegra_vi->isomgr_handle)
-		vi_isomgr_unregister(tegra_vi);
-#endif
 vi_probe_fail:
 	dev_err(&dev->dev, "%s: failed\n", __func__);
 	return err;
@@ -208,6 +265,10 @@ static int __exit vi_remove(struct platform_device *dev)
 		vi_isomgr_unregister(tegra_vi);
 #endif
 
+	vi_remove_debugfs(tegra_vi);
+
+	vi_intr_free(tegra_vi);
+
 	nvhost_client_device_release(dev);
 	pdata->aperture[0] = NULL;
 
@@ -221,6 +282,9 @@ static int __exit vi_remove(struct platform_device *dev)
 	tegra_pd_remove_device(&dev->dev);
 #endif
 
+	regulator_put(tegra_vi->reg);
+	tegra_vi->reg = NULL;
+
 	/* Remove I2C Devices according to settings from board file */
 	if (i2c_ctrl && i2c_ctrl->remove_devices)
 		i2c_ctrl->remove_devices(dev);
@@ -229,57 +293,6 @@ static int __exit vi_remove(struct platform_device *dev)
 
 	return 0;
 }
-
-#ifdef CONFIG_PM
-static int vi_suspend(struct device *dev)
-{
-#ifdef CONFIG_TEGRA_CAMERA
-	struct platform_device *pdev = to_platform_device(dev);
-	struct nvhost_device_data *pdata = platform_get_drvdata(pdev);
-	struct vi *tegra_vi = (struct vi *)pdata->private_data;
-	int ret;
-#endif
-
-	dev_info(dev, "%s: ++\n", __func__);
-
-#ifdef CONFIG_TEGRA_CAMERA
-	ret = tegra_camera_suspend(tegra_vi->camera);
-	if (ret) {
-		dev_info(dev, "%s: tegra_camera_suspend error=%d\n",
-		__func__, ret);
-		return ret;
-	}
-#endif
-
-	return 0;
-}
-
-static int vi_resume(struct device *dev)
-{
-#ifdef CONFIG_TEGRA_CAMERA
-	struct platform_device *pdev = to_platform_device(dev);
-	struct nvhost_device_data *pdata = platform_get_drvdata(pdev);
-	struct vi *tegra_vi = (struct vi *)pdata->private_data;
-#endif
-
-	dev_info(dev, "%s: ++\n", __func__);
-
-#ifdef CONFIG_TEGRA_CAMERA
-	tegra_camera_resume(tegra_vi->camera);
-#endif
-
-	return 0;
-}
-
-static const struct dev_pm_ops vi_pm_ops = {
-	.suspend = vi_suspend,
-	.resume = vi_resume,
-#if defined(CONFIG_PM_RUNTIME) && !defined(CONFIG_PM_GENERIC_DOMAINS)
-	.runtime_suspend = nvhost_module_disable_clk,
-	.runtime_resume = nvhost_module_enable_clk,
-#endif
-};
-#endif
 
 static struct platform_driver vi_driver = {
 	.probe = vi_probe,
