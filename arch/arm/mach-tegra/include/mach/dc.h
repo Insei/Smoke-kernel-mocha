@@ -7,7 +7,6 @@
  *	Erik Gilling <konkers@google.com>
  *
  * Copyright (c) 2010-2014, NVIDIA CORPORATION, All rights reserved.
- * Copyright (C) 2016 XiaoMi, Inc.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -247,7 +246,7 @@ struct tegra_dsi_cmd {
 #define DSI_CMD_VBLANK_SHORT_BOTH(di, p0, p1)	\
 		DSI_CMD_VBLANK_SHORT_LINK(di, p0, p1, TEGRA_DSI_LINK0), \
 		DSI_CMD_VBLANK_SHORT_LINK(di, p0, p1, TEGRA_DSI_LINK1)
-
+				
 #define DSI_CMD_SHORT_LINK(di, p0, p1, lnk_id) \
 			_DSI_CMD_SHORT(di, p0, p1, lnk_id, TEGRA_DSI_PACKET_CMD)
 
@@ -378,6 +377,12 @@ enum {
 #define DSI_HOST_SUSPEND_LV1		2
 #define DSI_HOST_SUSPEND_LV2		3
 
+struct tegra_dsi_board_info {
+	u32 platform_boardid;
+	u32 platform_boardversion;
+	u32 display_boardid;
+	u32 display_boardversion;
+};
 struct tegra_dsi_out {
 	u8		n_data_lanes;			/* required */
 	u8		pixel_format;			/* required */
@@ -389,8 +394,6 @@ struct tegra_dsi_out {
 	u16		dsi_panel_rst_gpio;
 	u16		dsi_panel_bl_en_gpio;
 	u16		dsi_panel_bl_pwm_gpio;
-	u8		chip_id;
-	u8		chip_rev;
 	u8		controller_vs;
 
 	bool		panel_has_frame_buffer;	/* required*/
@@ -451,6 +454,7 @@ struct tegra_dsi_out {
 
 	bool		lp00_pre_panel_wakeup;
 	bool		ulpm_not_supported;
+	struct tegra_dsi_board_info	boardinfo;
 };
 
 enum {
@@ -503,6 +507,7 @@ enum {
 	TEGRA_DC_OUT_DSI,
 	TEGRA_DC_OUT_DP,
 	TEGRA_DC_OUT_LVDS,
+	TEGRA_DC_OUT_NVSR_DP,
 };
 
 struct tegra_dc_out_pin {
@@ -563,6 +568,7 @@ struct tegra_dc_sd_window {
 
 struct tegra_dc_sd_settings {
 	unsigned enable;
+	unsigned enable_int;
 	bool use_auto_pwm;
 	u8 hw_update_delay;
 	u8 aggressiveness;
@@ -632,6 +638,9 @@ enum {
 	TEGRA_PIN_OUT_CONFIG_SEL_LSPI_DE,
 };
 
+/* this is the old name. provided for compatibility with old board files. */
+#define dcc_bus ddc_bus
+
 struct tegra_dc_out {
 	int				type;
 	unsigned			flags;
@@ -640,7 +649,7 @@ struct tegra_dc_out {
 	unsigned			h_size;
 	unsigned			v_size;
 
-	int				dcc_bus;
+	int				ddc_bus;
 	int				hotplug_gpio;
 	int				hotplug_state; /* 0 normal 1 force on */
 	const char			*parent_clk;
@@ -671,7 +680,7 @@ struct tegra_dc_out {
 
 	u8			*out_sel_configs;
 	unsigned		n_out_sel_configs;
-	bool			user_needs_vblank;
+	int			user_needs_vblank;
 	struct completion	user_vblank_comp;
 
 	int	(*enable)(struct device *);
@@ -708,6 +717,7 @@ struct tegra_dc_out {
 /* Errands use the interrupts */
 #define V_BLANK_FLIP		0
 #define V_BLANK_NVSD		1
+#define V_BLANK_USER		2
 
 #define V_PULSE2_FLIP		0
 #define V_PULSE2_NVSD		1
@@ -781,6 +791,7 @@ struct tegra_dc_win {
 	unsigned		z;
 
 	struct tegra_dc_csc	csc;
+	bool			csc_dirty;
 
 	int			dirty;
 	int			underflows;
@@ -885,8 +896,6 @@ struct tegra_dc_bw_data {
 };
 
 #define TEGRA_DC_FLAG_ENABLED		(1 << 0)
-#define TEGRA_DC_FLAG_CMU_DISABLE	(0 << 1)
-#define TEGRA_DC_FLAG_CMU_ENABLE	(1 << 1)
 
 int tegra_dc_get_stride(struct tegra_dc *dc, unsigned win);
 struct tegra_dc *tegra_dc_get_dc(unsigned idx);
@@ -895,9 +904,13 @@ bool tegra_dc_get_connected(struct tegra_dc *);
 bool tegra_dc_hpd(struct tegra_dc *dc);
 
 
+bool tegra_dc_has_vsync(struct tegra_dc *dc);
+int tegra_dc_vsync_enable(struct tegra_dc *dc);
+void tegra_dc_vsync_disable(struct tegra_dc *dc);
 void tegra_dc_get_fbvblank(struct tegra_dc *dc, struct fb_vblank *vblank);
 int tegra_dc_wait_for_vsync(struct tegra_dc *dc);
-void tegra_dc_blank(struct tegra_dc *dc);
+void tegra_dc_blank(struct tegra_dc *dc, unsigned windows);
+int tegra_dc_restore(struct tegra_dc *dc);
 
 void tegra_dc_enable(struct tegra_dc *dc);
 void tegra_dc_disable(struct tegra_dc *dc);
@@ -913,6 +926,7 @@ void tegra_dc_incr_syncpt_min(struct tegra_dc *dc, int i, u32 val);
  */
 int tegra_dc_update_windows(struct tegra_dc_win *windows[], int n);
 int tegra_dc_sync_windows(struct tegra_dc_win *windows[], int n);
+void tegra_dc_disable_window(struct tegra_dc *dc, unsigned win);
 int tegra_dc_config_frame_end_intr(struct tegra_dc *dc, bool enable);
 bool tegra_dc_is_within_n_vsync(struct tegra_dc *dc, s64 ts);
 bool tegra_dc_does_vsync_separate(struct tegra_dc *dc, s64 new_ts, s64 old_ts);
@@ -927,6 +941,8 @@ int tegra_dc_set_fb_mode(struct tegra_dc *dc, const struct fb_videomode *fbmode,
 unsigned tegra_dc_get_out_height(const struct tegra_dc *dc);
 unsigned tegra_dc_get_out_width(const struct tegra_dc *dc);
 unsigned tegra_dc_get_out_max_pixclock(const struct tegra_dc *dc);
+
+void nvsd_enbl_dsbl_prism(struct device *dev, bool status);
 
 /* PM0 and PM1 signal control */
 #define TEGRA_PWM_PM0 0
@@ -996,12 +1012,33 @@ struct tegra_hdmi_out {
 	int n_tmds_config;
 };
 
+enum {
+	DRIVE_CURRENT_L0 = 0,
+	DRIVE_CURRENT_L1 = 1,
+	DRIVE_CURRENT_L2 = 2,
+	DRIVE_CURRENT_L3 = 3,
+};
+
+enum {
+	PRE_EMPHASIS_L0 = 0,
+	PRE_EMPHASIS_L1 = 1,
+	PRE_EMPHASIS_L2 = 2,
+	PRE_EMPHASIS_L3 = 3,
+};
+
+enum {
+	POST_CURSOR2_L0 = 0,
+	POST_CURSOR2_L1 = 1,
+	POST_CURSOR2_L2 = 2,
+	POST_CURSOR2_L3 = 3,
+};
+
 struct tegra_dc_dp_lt_settings {
-	int drive_current;
-	int lane_preemphasis;
-	int post_cursor;
-	int tx_pu;
-	int load_adj;
+	u32 drive_current[4]; /* Entry for each lane */
+	u32 lane_preemphasis[4]; /* Entry for each lane */
+	u32 post_cursor[4]; /* Entry for each lane */
+	u32 tx_pu;
+	u32 load_adj;
 };
 
 struct tegra_dp_out {
@@ -1012,10 +1049,8 @@ struct tegra_dp_out {
 
 #ifdef CONFIG_PM_SLEEP
 void tegra_log_resume_time(void);
-void tegra_log_suspend_time(void);
 #else
 #define tegra_log_resume_time()
-#define tegra_log_suspend_time()
 #endif
 
 #endif
