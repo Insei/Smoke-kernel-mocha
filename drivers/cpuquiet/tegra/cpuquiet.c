@@ -1,9 +1,9 @@
 /*
- * arch/arm/mach-tegra/cpuquiet.c
+ * drivers/cpuquiet/tegra/cpuquiet.c
  *
  * Cpuquiet driver for Tegra CPUs
  *
- * Copyright (c) 2012-2013 NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2012-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@
  * with this program; if not, write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
-
+ 
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/sched.h>
@@ -36,8 +36,8 @@
 #include <linux/debugfs.h>
 
 #include "pm.h"
-#include "cpu-tegra.h"
-#include "clock.h"
+#include "../../arch/arm/mach-tegra/cpu-tegra.h"
+#include "../../arch/arm/mach-tegra/clock.h"
 
 #define INITIAL_STATE		TEGRA_CPQ_DISABLED
 #define UP_DELAY_MS		70
@@ -49,7 +49,9 @@ static DEFINE_MUTEX(tegra_cpq_lock_stats);
 
 static struct workqueue_struct *cpuquiet_wq;
 static struct work_struct cpuquiet_work;
+#ifdef CONFIG_TEGRA_CLUSTER_CONTROL
 static struct timer_list updown_timer;
+#endif
 
 static struct kobject *tegra_auto_sysfs_kobject;
 
@@ -66,15 +68,16 @@ static wait_queue_head_t wait_cpu;
  */
 static int no_lp;
 static bool enable;
+static unsigned int idle_bottom_freq;
+#ifdef CONFIG_TEGRA_CLUSTER_CONTROL
 static unsigned long up_delay;
 static unsigned long down_delay;
-static unsigned long hotplug_timeout;
 static unsigned int idle_top_freq;
-static unsigned int idle_bottom_freq;
-
 static struct clk *cpu_clk;
 static struct clk *cpu_g_clk;
 static struct clk *cpu_lp_clk;
+#endif
+static unsigned long hotplug_timeout;
 
 static struct cpumask cr_online_requests;
 static struct cpumask cr_offline_requests;
@@ -160,6 +163,7 @@ static void hp_stats_update(unsigned int cpu, bool up)
 	mutex_unlock(&tegra_cpq_lock_stats);
 }
 
+#ifdef CONFIG_TEGRA_CLUSTER_CONTROL
 /* must be called with tegra_cpu_lock held */
 static void __update_target_cluster(unsigned int cpu_freq, bool suspend)
 {
@@ -240,6 +244,10 @@ static void __update_target_cluster(unsigned int cpu_freq, bool suspend)
 		}
 	}
 }
+#else
+static inline void __update_target_cluster(unsigned int cpu_freq, bool suspend)
+{ }
+#endif
 
 static int update_core_config(unsigned int cpunumber, bool up)
 {
@@ -247,11 +255,11 @@ static int update_core_config(unsigned int cpunumber, bool up)
 
 	mutex_lock(tegra_cpu_lock);
 
-	if (cpq_state == TEGRA_CPQ_DISABLED || cpunumber >= nr_cpu_ids) {
+	if (cpq_state == TEGRA_CPQ_DISABLED || cpunumber >= nr_cpu_ids ||
+		!cpunumber) {
 		mutex_unlock(tegra_cpu_lock);
 		return -EINVAL;
 	}
-
 
 	if (up) {
 		cpumask_set_cpu(cpunumber, &cr_online_requests);
@@ -322,6 +330,7 @@ static struct cpuquiet_driver tegra_cpuquiet_driver = {
         .wake_cpu               = tegra_wake_cpu,
 };
 
+#ifdef CONFIG_TEGRA_CLUSTER_CONTROL
 static void updown_handler(unsigned long data)
 {
 	queue_work(cpuquiet_wq, &cpuquiet_work);
@@ -369,6 +378,7 @@ static int __apply_cluster_config(int state, int target_state)
 
 	return new_state;
 }
+#endif
 
 /* must be called from worker function */
 static void __cpuinit __apply_core_config(void)
@@ -395,6 +405,7 @@ static void __cpuinit __apply_core_config(void)
 	/* always keep CPU0 online */
 	cpumask_set_cpu(0, &online);
 	cpu_online = *cpu_online_mask;
+	cpumask_clear_cpu(0, &offline);
 
 	if (no_lp == -1) {
 		max_cpus = 1;
@@ -471,7 +482,7 @@ static void __cpuinit tegra_cpuquiet_work_func(struct work_struct *work)
 	}
 
 	mutex_unlock(tegra_cpu_lock);
-
+#ifdef CONFIG_TEGRA_CLUSTER_CONTROL
 	if (current_cluster != new_cluster) {
 		current_cluster = __apply_cluster_config(current_cluster,
 					new_cluster);
@@ -483,7 +494,7 @@ static void __cpuinit tegra_cpuquiet_work_func(struct work_struct *work)
 		else
 			cpuquiet_device_free();
 	}
-
+#endif
 	if (current_cluster == TEGRA_CPQ_G)
 		__apply_core_config();
 }
@@ -496,8 +507,9 @@ static int min_cpus_notify(struct notifier_block *nb, unsigned long n, void *p)
 		mutex_unlock(tegra_cpu_lock);
 		return NOTIFY_OK;
 	}
-
+#ifdef CONFIG_TEGRA_CLUSTER_CONTROL
 	__update_target_cluster(tegra_getspeed(0), false);
+#endif
 	queue_work(cpuquiet_wq, &cpuquiet_work);
 	mutex_unlock(tegra_cpu_lock);
 
@@ -516,21 +528,45 @@ static int max_cpus_notify(struct notifier_block *nb, unsigned long n, void *p)
 	return NOTIFY_OK;
 }
 
+#ifndef CONFIG_TEGRA_CLUSTER_CONTROL
+/* Must be called with tegra_cpu_lock held */
+static void __idle_stop_governor(unsigned int freq)
+{
+	if (cpq_state == TEGRA_CPQ_DISABLED)
+		return;
+
+	if (freq <= idle_bottom_freq && num_online_cpus() == 1)
+		cpuquiet_device_busy();
+	else
+		cpuquiet_device_free();
+}
+#endif
+
 static int __cpuinit cpu_online_notify(struct notifier_block *nfb,
 					unsigned long action, void *hcpu)
 {
+	unsigned int freq;
+
 	switch (action) {
 	case CPU_POST_DEAD:
 		if (num_online_cpus() == 1) {
 			mutex_lock(tegra_cpu_lock);
-			__update_target_cluster(tegra_getspeed(0), false);
+			freq = tegra_getspeed(0);
+			__update_target_cluster(freq, false);
+#ifndef CONFIG_TEGRA_CLUSTER_CONTROL
+			__idle_stop_governor(freq);
+#endif
 			mutex_unlock(tegra_cpu_lock);
 		}
 		break;
 	case CPU_ONLINE:
 	case CPU_ONLINE_FROZEN:
 		mutex_lock(tegra_cpu_lock);
-		__update_target_cluster(tegra_getspeed(0), false);
+		freq = tegra_getspeed(0);
+		__update_target_cluster(freq, false);
+#ifndef CONFIG_TEGRA_CLUSTER_CONTROL
+		__idle_stop_governor(freq);
+#endif
 		mutex_unlock(tegra_cpu_lock);
 		break;
 	}
@@ -538,6 +574,7 @@ static int __cpuinit cpu_online_notify(struct notifier_block *nfb,
 	return NOTIFY_OK;
 }
 
+#ifdef CONFIG_TEGRA_CLUSTER_CONTROL
 /* must be called with tegra_cpu_lock held */
 void tegra_auto_hotplug_governor(unsigned int cpu_freq, bool suspend)
 {
@@ -561,6 +598,16 @@ void tegra_auto_hotplug_governor(unsigned int cpu_freq, bool suspend)
 
 	__update_target_cluster(cpu_freq, suspend);
 }
+#else
+void tegra_auto_hotplug_governor(unsigned int cpu_freq, bool suspend)
+{
+	__idle_stop_governor(cpu_freq);
+}
+#endif
+
+static struct notifier_block __cpuinitdata cpu_online_notifier = {
+	.notifier_call = cpu_online_notify,
+};
 
 static struct notifier_block min_cpus_notifier = {
 	.notifier_call = min_cpus_notify,
@@ -568,10 +615,6 @@ static struct notifier_block min_cpus_notifier = {
 
 static struct notifier_block max_cpus_notifier = {
 	.notifier_call = max_cpus_notify,
-};
-
-static struct notifier_block __cpuinitdata cpu_online_notifier = {
-	.notifier_call = cpu_online_notify,
 };
 
 static void delay_callback(struct cpuquiet_attribute *attr)
@@ -600,6 +643,7 @@ static void enable_callback(struct cpuquiet_attribute *attr)
 	wait_event_interruptible(wait_enable, cpq_state == target_state);
 }
 
+#ifdef CONFIG_TEGRA_CLUSTER_CONTROL
 ssize_t store_no_lp(struct cpuquiet_attribute *attr,
 		const char *buf,
 		size_t count)
@@ -639,19 +683,22 @@ ssize_t store_no_lp(struct cpuquiet_attribute *attr,
 		return -ETIMEDOUT;
 }
 
-CPQ_BASIC_ATTRIBUTE(idle_top_freq, 0644, uint);
-CPQ_BASIC_ATTRIBUTE(idle_bottom_freq, 0644, uint);
 CPQ_ATTRIBUTE_CUSTOM(no_lp, 0644, show_int_attribute, store_no_lp);
+CPQ_BASIC_ATTRIBUTE(idle_top_freq, 0644, uint);
 CPQ_ATTRIBUTE(up_delay, 0644, ulong, delay_callback);
 CPQ_ATTRIBUTE(down_delay, 0644, ulong, delay_callback);
+#endif
+CPQ_BASIC_ATTRIBUTE(idle_bottom_freq, 0644, uint);
 CPQ_ATTRIBUTE(hotplug_timeout, 0644, ulong, delay_callback);
 CPQ_ATTRIBUTE(enable, 0644, bool, enable_callback);
 
 static struct attribute *tegra_auto_attributes[] = {
+#ifdef CONFIG_TEGRA_CLUSTER_CONTROL
 	&no_lp_attr.attr,
 	&up_delay_attr.attr,
 	&down_delay_attr.attr,
 	&idle_top_freq_attr.attr,
+#endif
 	&idle_bottom_freq_attr.attr,
 	&enable_attr.attr,
 	&hotplug_timeout_attr.attr,
@@ -775,13 +822,14 @@ int __cpuinit tegra_auto_hotplug_init(struct mutex *cpulock)
 {
 	int err;
 
+#ifdef CONFIG_TEGRA_CLUSTER_CONTROL
 	cpu_clk = clk_get_sys(NULL, "cpu");
 	cpu_g_clk = clk_get_sys(NULL, "cpu_g");
 	cpu_lp_clk = clk_get_sys(NULL, "cpu_lp");
 
 	if (IS_ERR(cpu_clk) || IS_ERR(cpu_g_clk) || IS_ERR(cpu_lp_clk))
 		return -ENOENT;
-
+#endif
 	tegra_cpu_lock = cpulock;
 
 	init_waitqueue_head(&wait_no_lp);
@@ -799,14 +847,15 @@ int __cpuinit tegra_auto_hotplug_init(struct mutex *cpulock)
 		return -ENOMEM;
 
 	INIT_WORK(&cpuquiet_work, tegra_cpuquiet_work_func);
+#ifdef CONFIG_TEGRA_CLUSTER_CONTROL
 	init_timer(&updown_timer);
 	updown_timer.function = updown_handler;
-
 	idle_top_freq = clk_get_max_rate(cpu_lp_clk) / 1000;
 	idle_bottom_freq = clk_get_min_rate(cpu_g_clk) / 1000;
 
 	up_delay = msecs_to_jiffies(UP_DELAY_MS);
 	down_delay = msecs_to_jiffies(DOWN_DELAY_MS);
+#endif
 	hotplug_timeout = msecs_to_jiffies(HOTPLUG_DELAY_MS);
 	cpumask_clear(&cr_online_requests);
 	cpumask_clear(&cr_offline_requests);
@@ -827,6 +876,10 @@ int __cpuinit tegra_auto_hotplug_init(struct mutex *cpulock)
 			__func__);
 
 	register_hotcpu_notifier(&cpu_online_notifier);
+
+#ifndef CONFIG_TEGRA_CLUSTER_CONTROL
+	idle_bottom_freq = 714000;
+#endif
 
 	err = cpuquiet_register_driver(&tegra_cpuquiet_driver);
 	if (err) {

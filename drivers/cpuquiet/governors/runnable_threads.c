@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2013 NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2012-2015 NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -44,7 +44,7 @@ static unsigned int sample_rate = 20;		/* msec */
 #define NR_FSHIFT	(1 << NR_FSHIFT_EXP)
 /* avg run threads * 8 (e.g., 11 = 1.375 threads) */
 static unsigned int default_thresholds[] = {
-	10, 18, 20, UINT_MAX
+	10, 14, 20, UINT_MAX
 };
 
 static unsigned int nr_run_last;
@@ -160,20 +160,13 @@ static void runnables_avg_sampler(unsigned long data)
 	}
 }
 
-static unsigned int get_lightest_loaded_cpu_n(void)
+static unsigned int get_last_online_cpu_n(void)
 {
-	unsigned long min_avg_runnables = ULONG_MAX;
 	unsigned int cpu = nr_cpu_ids;
 	int i;
 
-	for_each_online_cpu(i) {
-		struct runnables_avg_sample *s = &per_cpu(avg_nr_sample, i);
-		unsigned int nr_runnables = s->avg;
-		if (i > 0 && min_avg_runnables > nr_runnables) {
-			cpu = i;
-			min_avg_runnables = nr_runnables;
-		}
-	}
+	for_each_online_cpu(i)
+		cpu = i;
 
 	return cpu;
 }
@@ -192,18 +185,69 @@ static void runnables_work_func(struct work_struct *work)
 		if (cpu < nr_cpu_ids)
 			cpuquiet_wake_cpu(cpu, false);
 	} else if (action < 0) {
-		cpu = get_lightest_loaded_cpu_n();
+		cpu = get_last_online_cpu_n();
 		if (cpu < nr_cpu_ids)
 			cpuquiet_quiesence_cpu(cpu, false);
 	}
 }
 
+#define MAX_BYTES 100
+
+static ssize_t show_thresholds(struct cpuquiet_attribute *attr, char *buf)
+{
+	char buffer[MAX_BYTES];
+	unsigned int i;
+	int size = 0;
+	buffer[0] = 0;
+	for_each_possible_cpu(i) {
+		if (i == ARRAY_SIZE(nr_run_thresholds) - 1)
+			break;
+		if (size >= sizeof(buffer))
+			break;
+		size += snprintf(buffer + size, sizeof(buffer) - size,
+			 "%u->%u core threshold: %u\n",
+			  i + 1, i + 2, nr_run_thresholds[i]);
+	}
+	return snprintf(buf, sizeof(buffer), "%s", buffer);
+}
+
+static ssize_t store_thresholds(struct cpuquiet_attribute *attr,
+				const char *buf, size_t count)
+{
+	int ret, i = 0;
+	char *val, *str, input[MAX_BYTES];
+	unsigned int thresholds[NR_CPUS];
+
+	if (!count || count >= MAX_BYTES)
+		return -EINVAL;
+	strncpy(input, buf, count);
+	input[count] = '\0';
+	str = input;
+	memcpy(thresholds, nr_run_thresholds, sizeof(nr_run_thresholds));
+	while ((val = strsep(&str, " ")) != NULL) {
+		if (*val == '\0')
+			continue;
+		if (i == ARRAY_SIZE(nr_run_thresholds) - 1)
+			break;
+		ret = kstrtouint(val, 10, &thresholds[i]);
+		if (ret)
+			return -EINVAL;
+		i++;
+	}
+
+	memcpy(nr_run_thresholds, thresholds, sizeof(thresholds));
+	return count;
+}
+
 CPQ_BASIC_ATTRIBUTE(sample_rate, 0644, uint);
 CPQ_BASIC_ATTRIBUTE(nr_run_hysteresis, 0644, uint);
+CPQ_ATTRIBUTE_CUSTOM(nr_run_thresholds, 0644,
+			show_thresholds, store_thresholds);
 
 static struct attribute *runnables_attributes[] = {
 	&sample_rate_attr.attr,
 	&nr_run_hysteresis_attr.attr,
+	&nr_run_thresholds_attr.attr,
 	NULL,
 };
 
@@ -241,7 +285,6 @@ static void runnables_device_busy(void)
 	mutex_lock(&runnables_lock);
 	if (runnables_state == RUNNING) {
 		runnables_state = IDLE;
-		cancel_work_sync(&runnables_work);
 		del_timer_sync(&runnables_timer);
 	}
 	mutex_unlock(&runnables_lock);
@@ -263,34 +306,19 @@ static void runnables_stop(void)
 
 	runnables_state = DISABLED;
 	del_timer_sync(&runnables_timer);
-	cancel_work_sync(&runnables_work);
 	kobject_put(runnables_kobject);
+	kfree(runnables_kobject);
 
 	mutex_unlock(&runnables_lock);
 }
 
 static int runnables_start(void)
 {
-	int err, i;
+	int err;
 
 	err = runnables_sysfs();
 	if (err)
 		return err;
-
-	INIT_WORK(&runnables_work, runnables_work_func);
-
-	init_timer(&runnables_timer);
-	runnables_timer.function = runnables_avg_sampler;
-
-	for(i = 0; i < ARRAY_SIZE(nr_run_thresholds); ++i) {
-		if (i < ARRAY_SIZE(default_thresholds))
-			nr_run_thresholds[i] = default_thresholds[i];
-		else if (i == (ARRAY_SIZE(nr_run_thresholds) - 1))
-			nr_run_thresholds[i] = UINT_MAX;
-		else
-			nr_run_thresholds[i] = i + 1 +
-				NR_FSHIFT / default_threshold_level;
-	}
 
 	mutex_lock(&runnables_lock);
 	runnables_state = RUNNING;
@@ -312,6 +340,23 @@ struct cpuquiet_governor runnables_governor = {
 
 static int __init init_runnables(void)
 {
+	int i;
+
+	INIT_WORK(&runnables_work, runnables_work_func);
+
+	init_timer(&runnables_timer);
+	runnables_timer.function = runnables_avg_sampler;
+
+	for (i = 0; i < ARRAY_SIZE(nr_run_thresholds); ++i) {
+		if (i == (ARRAY_SIZE(nr_run_thresholds) - 1))
+			nr_run_thresholds[i] = UINT_MAX;
+		else if (i < ARRAY_SIZE(default_thresholds))
+			nr_run_thresholds[i] = default_thresholds[i];
+		else
+			nr_run_thresholds[i] = i + 1 +
+				NR_FSHIFT / default_threshold_level;
+	}
+
 	return cpuquiet_register_governor(&runnables_governor);
 }
 
