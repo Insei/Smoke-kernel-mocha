@@ -2953,7 +2953,7 @@ static int cputemp_get(void *data, u64 *val)
 {
 	u32 reg;
 	reg = soctherm_readl(TS_TEMP1);
-	*val = (reg & 0xffff0000) >> 16;
+	*val = temp_translate(REG_GET(reg, TS_TEMP1_CPU_TEMP));
 	return 0;
 }
 
@@ -2970,7 +2970,7 @@ static int gputemp_get(void *data, u64 *val)
 {
 	u32 reg;
 	reg = soctherm_readl(TS_TEMP1);
-	*val = (reg & 0x0000ffff);
+	*val = temp_translate(REG_GET(reg, TS_TEMP1_GPU_TEMP));
 	return 0;
 }
 
@@ -2987,7 +2987,7 @@ static int memtemp_get(void *data, u64 *val)
 {
 	u32 reg;
 	reg = soctherm_readl(TS_TEMP2);
-	*val = (reg & 0xffff0000) >> 16;
+	*val = temp_translate(REG_GET(reg, TS_TEMP2_MEM_TEMP));
 	return 0;
 }
 
@@ -3004,7 +3004,7 @@ static int plltemp_get(void *data, u64 *val)
 {
 	u32 reg;
 	reg = soctherm_readl(TS_TEMP2);
-	*val = (reg & 0x0000ffff);
+	*val = temp_translate(REG_GET(reg, TS_TEMP2_PLLX_TEMP));
 	return 0;
 }
 
