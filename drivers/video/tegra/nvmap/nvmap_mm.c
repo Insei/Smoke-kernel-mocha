@@ -67,7 +67,7 @@ int nvmap_set_pages_array_uc(struct page **pages, int addrinarray)
 #ifdef CONFIG_NVMAP_CPA
 	return set_pages_array_uc(pages, addrinarray);
 #else
-	flush_cache(pages, addrinarray);
+	nvmap_flush_cache(pages, addrinarray);
 	return 0;
 #endif
 }
