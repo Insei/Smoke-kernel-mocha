@@ -1154,7 +1154,6 @@ static int tegra_dc_dp_explore_link_cfg(struct tegra_dc_dp_data *dp,
 	}
 
 	ret = tegra_dp_link_config(dp, cfg);
-fail:
 	return ret;
 }
 
