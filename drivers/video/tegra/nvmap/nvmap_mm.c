@@ -3,7 +3,7 @@
  *
  * Some MM related functionality specific to nvmap.
  *
- * Copyright (c) 2013, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2014, NVIDIA CORPORATION. All rights reserved.
  * Copyright (C) 2016 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -41,8 +41,7 @@ void inner_clean_cache_all(void)
 #endif
 }
 
-#ifndef CONFIG_NVMAP_CPA
-static void flush_cache(struct page **pages, int numpages)
+void nvmap_flush_cache(struct page **pages, int numpages)
 {
 	unsigned int i;
 	bool flush_inner = true;
@@ -62,7 +61,6 @@ static void flush_cache(struct page **pages, int numpages)
 		outer_flush_range(base, base + PAGE_SIZE);
 	}
 }
-#endif
 
 int nvmap_set_pages_array_uc(struct page **pages, int addrinarray)
 {
@@ -79,7 +77,7 @@ int nvmap_set_pages_array_wc(struct page **pages, int addrinarray)
 #ifdef CONFIG_NVMAP_CPA
 	return set_pages_array_wc(pages, addrinarray);
 #else
-	flush_cache(pages, addrinarray);
+	nvmap_flush_cache(pages, addrinarray);
 	return 0;
 #endif
 }
@@ -89,7 +87,7 @@ int nvmap_set_pages_array_iwb(struct page **pages, int addrinarray)
 #ifdef CONFIG_NVMAP_CPA
 	return set_pages_array_iwb(pages, addrinarray);
 #else
-	flush_cache(pages, addrinarray);
+	nvmap_flush_cache(pages, addrinarray);
 	return 0;
 #endif
 }

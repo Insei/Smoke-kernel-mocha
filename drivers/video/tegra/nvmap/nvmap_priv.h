@@ -389,6 +389,7 @@ int nvmap_set_pages_array_uc(struct page **pages, int addrinarray);
 int nvmap_set_pages_array_wc(struct page **pages, int addrinarray);
 int nvmap_set_pages_array_iwb(struct page **pages, int addrinarray);
 int nvmap_set_pages_array_wb(struct page **pages, int addrinarray);
+void nvmap_flush_cache(struct page **pages, int numpages);
 
 int nvmap_do_cache_maint_list(struct nvmap_handle **handles, u32 *offsets,
 			      u32 *sizes, int op, int nr);
