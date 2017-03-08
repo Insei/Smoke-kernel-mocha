@@ -244,6 +244,7 @@ struct tegra_dc_dp_data {
 	bool				 suspended;
 
 	struct completion		hpd_plug;
+	struct completion		aux_tx;
 
 	struct tegra_dp_out		*pdata;
 };
