@@ -137,7 +137,7 @@ static int dbg_dsi_show(struct seq_file *s, void *unused)
 
 static int dbg_dsi_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, regdump_show, inode->i_private);
+	return single_open(file, dbg_dsi_show, inode->i_private);
 }
 
 static const struct file_operations dbg_fops = {
