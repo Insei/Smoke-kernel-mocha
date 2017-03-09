@@ -4,7 +4,6 @@
  * GK20A Graphics
  *
  * Copyright (c) 2011-2014, NVIDIA CORPORATION.  All rights reserved.
- * Copyright (C) 2016 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -69,9 +68,6 @@ struct gk20a {
 	void __iomem *bar1;
 
 	bool power_on;
-#ifdef CONFIG_INPUT_CFBOOST
-	bool boost_added;
-#endif
 	bool irq_requested;
 
 	struct clk_gk20a clk;
@@ -94,7 +90,6 @@ struct gk20a {
 	bool blcg_enabled;
 	bool elcg_enabled;
 	bool elpg_enabled;
-	bool aelpg_enabled;
 
 #ifdef CONFIG_DEBUG_FS
 	spinlock_t debugfs_lock;
@@ -112,6 +107,7 @@ struct gk20a {
 
 	void (*remove_support)(struct platform_device *);
 
+	struct notifier_block system_suspend_notifier;
 	u64 pg_ingating_time_us;
 	u64 pg_ungating_time_us;
 	u32 pg_gating_cnt;

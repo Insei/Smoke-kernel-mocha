@@ -25,7 +25,6 @@
 #include <linux/clk/tegra.h>
 #include <linux/tegra-soc.h>
 #include <linux/platform_data/tegra_edp.h>
-#include <linux/pm_qos.h>
 
 #include <governor.h>
 
@@ -73,42 +72,18 @@ void nvhost_gk20a_scale_callback(struct nvhost_device_profile *profile,
 				 unsigned long freq)
 {
 	struct gk20a *g = get_gk20a(profile->pdev);
+	struct nvhost_device_data *pdata = platform_get_drvdata(profile->pdev);
 	struct nvhost_emc_params *emc_params = profile->private_data;
 	long after = gk20a_clk_get_rate(g);
 	long emc_target = nvhost_scale3d_get_emc_rate(emc_params, after);
 
 	nvhost_module_set_devfreq_rate(profile->pdev, 2, emc_target);
-}
 
-/*
- * nvhost_scale_qos_notify()
- *
- * This function is called when the minimum QoS requirement for the device
- * has changed. The function calls postscaling callback if it is defined.
- */
-
-static int nvhost_scale_qos_notify(struct notifier_block *nb,
-				   unsigned long n, void *p)
-{
-	struct nvhost_device_profile *profile =
-		container_of(nb, struct nvhost_device_profile,
-			     qos_notify_block);
-	struct nvhost_device_data *pdata = platform_get_drvdata(profile->pdev);
-	struct gk20a *g = get_gk20a(profile->pdev);
-	unsigned long freq;
-
-	if (!pdata->scaling_post_cb)
-		return NOTIFY_OK;
-
-	/* get the frequency requirement. if devfreq is enabled, check if it
-	 * has higher demand than qos */
-	freq = gk20a_clk_round_rate(g, pm_qos_request(pdata->qos_id));
-	if (pdata->power_manager)
-		freq = max(pdata->power_manager->previous_freq, freq);
-
-	pdata->scaling_post_cb(profile, freq);
-
-	return NOTIFY_OK;
+	if (pdata->gpu_edp_device) {
+		u32 avg = 0;
+		gk20a_pmu_load_norm(g, &avg);
+		tegra_edp_notify_gpu_load(avg);
+	}
 }
 
 /*
@@ -203,14 +178,6 @@ static void gk20a_scale_notify(struct platform_device *pdev, bool busy)
 	struct nvhost_device_data *pdata = platform_get_drvdata(pdev);
 	struct nvhost_device_profile *profile = pdata->power_profile;
 	struct devfreq *devfreq = pdata->power_manager;
-	struct gk20a *g = get_gk20a(pdev);
-
-	/* inform edp about new constraint */
-	if (pdata->gpu_edp_device) {
-		u32 avg = 0;
-		gk20a_pmu_load_norm(g, &avg);
-		tegra_edp_notify_gpu_load(avg);
-	}
 
 	/* Is the device profile initialised? */
 	if (!(profile && devfreq))
@@ -334,16 +301,6 @@ void nvhost_gk20a_scale_init(struct platform_device *pdev)
 
 		pdata->power_manager = devfreq;
 	}
-
-	/* Should we register QoS callback for this device? */
-	if (pdata->qos_id < PM_QOS_NUM_CLASSES &&
-	    pdata->qos_id != PM_QOS_RESERVED) {
-		profile->qos_notify_block.notifier_call =
-			&nvhost_scale_qos_notify;
-		pm_qos_add_notifier(pdata->qos_id,
-				    &profile->qos_notify_block);
-	}
-
 	return;
 
 err_get_freqs:

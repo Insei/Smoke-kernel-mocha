@@ -66,9 +66,8 @@ struct gpfifo_desc {
 };
 
 struct mmu_desc {
-	void *cpuva;
-	u64 iova;
-	size_t size;
+	struct mem_desc mem;
+	phys_addr_t cpu_pa;
 };
 
 struct inst_desc {
@@ -100,9 +99,7 @@ struct runlist_mem_desc {
 };
 
 struct patch_desc {
-	struct page **pages;
-	u64 iova;
-	size_t size;
+	struct mem_desc mem;
 	void *cpu_va;
 	u64 gpu_va;
 	u32 data_count;
@@ -136,9 +133,7 @@ struct pm_ctx_desc {
 };
 
 struct gr_ctx_desc {
-	struct page **pages;
-	u64 iova;
-	size_t size;
+	struct mem_desc mem;
 	u64 gpu_va;
 };
 
@@ -155,7 +150,6 @@ struct page_table_gk20a {
 	/* track mapping cnt on this page table */
 	u32 ref_cnt;
 	struct sg_table *sgt;
-	size_t size;
 };
 
 enum gmmu_pgsz_gk20a {
@@ -172,7 +166,6 @@ struct page_directory_gk20a {
 	/* Either a *page or a *mem_handle */
 	void *ref;
 	struct sg_table *sgt;
-	size_t size;
 	struct page_table_gk20a *ptes[gmmu_nr_page_sizes];
 };
 
@@ -337,10 +330,6 @@ phys_addr_t gk20a_get_phys_from_iova(struct device *d,
 
 int gk20a_get_sgtable(struct device *d, struct sg_table **sgt,
 			void *cpuva, u64 iova,
-			size_t size);
-
-int gk20a_get_sgtable_from_pages(struct device *d, struct sg_table **sgt,
-			struct page **pages, u64 iova,
 			size_t size);
 
 void gk20a_free_sgtable(struct sg_table **sgt);

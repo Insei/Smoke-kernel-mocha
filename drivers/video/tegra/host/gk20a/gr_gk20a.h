@@ -1,7 +1,7 @@
 /*
  * GK20A Graphics Engine
  *
- * Copyright (c) 2011-2014, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2011-2013, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -28,9 +28,6 @@
 #define INVALID_SCREEN_TILE_ROW_OFFSET	0xFFFFFFFF
 #define INVALID_MAX_WAYS		0xFFFFFFFF
 
-#define GK20A_FECS_UCODE_IMAGE	"fecs.bin"
-#define GK20A_GPCCS_UCODE_IMAGE	"gpccs.bin"
-
 enum /* global_ctx_buffer */ {
 	CIRCULAR		= 0,
 	PAGEPOOL		= 1,
@@ -39,8 +36,7 @@ enum /* global_ctx_buffer */ {
 	PAGEPOOL_VPR		= 4,
 	ATTRIBUTE_VPR		= 5,
 	GOLDEN_CTX		= 6,
-	PRIV_ACCESS_MAP		= 7,
-	NR_GLOBAL_CTX_BUF	= 8
+	NR_GLOBAL_CTX_BUF	= 7
 };
 
 /* either ATTRIBUTE or ATTRIBUTE_VPR maps to ATTRIBUTE_VA */
@@ -49,8 +45,7 @@ enum  /*global_ctx_buffer_va */ {
 	PAGEPOOL_VA		= 1,
 	ATTRIBUTE_VA		= 2,
 	GOLDEN_CTX_VA		= 3,
-	PRIV_ACCESS_MAP_VA	= 4,
-	NR_GLOBAL_CTX_BUF_VA	= 5
+	NR_GLOBAL_CTX_BUF_VA	= 4
 };
 
 enum {
@@ -174,8 +169,6 @@ struct gr_gk20a {
 		u32 zcull_ctxsw_image_size;
 
 		u32 buffer_header_size;
-
-		u32 priv_access_map_size;
 
 		struct gr_ucode_gk20a ucode;
 
@@ -327,8 +320,6 @@ int gk20a_gr_isr(struct gk20a *g);
 int gk20a_gr_nonstall_isr(struct gk20a *g);
 
 int gk20a_gr_clear_comptags(struct gk20a *g, u32 min, u32 max);
-int gk20a_gr_flush_comptags(struct gk20a *g, bool invalidate);
-
 /* zcull */
 u32 gr_gk20a_get_ctxsw_zcull_size(struct gk20a *g, struct gr_gk20a *gr);
 int gr_gk20a_bind_ctxsw_zcull(struct gk20a *g, struct gr_gk20a *gr,
@@ -356,15 +347,9 @@ bool gk20a_gr_sm_debugger_attached(struct gk20a *g);
 #define gr_gk20a_elpg_protected_call(g, func) \
 	({ \
 		int err; \
-		if (support_gk20a_pmu()) { \
-			mutex_lock(&g->pmu.pg_init_mutex); \
-			gk20a_pmu_disable_elpg(g); \
-		} \
+		gk20a_pmu_disable_elpg(g); \
 		err = func; \
-		if (support_gk20a_pmu()) { \
-			gk20a_pmu_enable_elpg(g); \
-			mutex_unlock(&g->pmu.pg_init_mutex); \
-		} \
+		gk20a_pmu_enable_elpg(g); \
 		err; \
 	})
 
@@ -380,7 +365,5 @@ int gr_gk20a_get_ctx_buffer_offsets(struct gk20a *g,
 				    u32 *offsets, u32 *offset_addrs,
 				    u32 *num_offsets,
 				    bool is_quad, u32 quad);
-int gr_gk20a_update_smpc_ctxsw_mode(struct gk20a *g,
-				 struct channel_gk20a *c,
-				    bool enable_smpc_ctxsw);
+
 #endif /*__GR_GK20A_H__*/

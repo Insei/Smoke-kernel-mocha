@@ -3,8 +3,7 @@
  *
  * GK20A PMU (aka. gPMU outside gk20a context)
  *
- * Copyright (c) 2011-2014, NVIDIA CORPORATION.  All rights reserved.
- * Copyright (C) 2016 XiaoMi, Inc.
+ * Copyright (c) 2011-2013, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -45,12 +44,6 @@
 static void pmu_dump_falcon_stats(struct pmu_gk20a *pmu);
 static int gk20a_pmu_get_elpg_residency_gating(struct gk20a *g,
 		u32 *ingating_time, u32 *ungating_time, u32 *gating_cnt);
-static void pmu_save_zbc(struct gk20a *g, u32 entries);
-static void ap_callback_init_and_enable_ctrl(
-		struct gk20a *g, struct pmu_msg *msg,
-		void *param, u32 seq_desc, u32 status);
-static int gk20a_pmu_ap_send_command(struct gk20a *g,
-			union pmu_ap_cmd *p_ap_cmd, bool b_block);
 
 static void pmu_copy_from_dmem(struct pmu_gk20a *pmu,
 			u32 src, u8* dst, u32 size, u8 port)
@@ -422,17 +415,14 @@ static int pmu_seq_acquire(struct pmu_gk20a *pmu,
 	struct pmu_sequence *seq;
 	u32 index;
 
-	mutex_lock(&pmu->pmu_seq_lock);
 	index = find_first_zero_bit(pmu->pmu_seq_tbl,
 				sizeof(pmu->pmu_seq_tbl));
 	if (index >= sizeof(pmu->pmu_seq_tbl)) {
 		nvhost_err(dev_from_gk20a(g),
 			"no free sequence available");
-		mutex_unlock(&pmu->pmu_seq_lock);
 		return -EAGAIN;
 	}
 	set_bit(index, pmu->pmu_seq_tbl);
-	mutex_unlock(&pmu->pmu_seq_lock);
 
 	seq = &pmu->seq[index];
 	seq->state = PMU_SEQ_STATE_PENDING;
@@ -558,7 +548,7 @@ int pmu_mutex_acquire(struct pmu_gk20a *pmu, u32 id, u32 *token)
 	u32 data, owner, max_retry;
 
 	if (!pmu->initialized)
-		return -EINVAL;
+		return 0;
 
 	BUG_ON(!token);
 	BUG_ON(!PMU_MUTEX_ID_IS_VALID(id));
@@ -627,7 +617,7 @@ int pmu_mutex_release(struct pmu_gk20a *pmu, u32 id, u32 *token)
 	u32 owner, data;
 
 	if (!pmu->initialized)
-		return -EINVAL;
+		return 0;
 
 	BUG_ON(!token);
 	BUG_ON(!PMU_MUTEX_ID_IS_VALID(id));
@@ -671,10 +661,15 @@ static int pmu_queue_lock(struct pmu_gk20a *pmu,
 
 	if (PMU_IS_SW_COMMAND_QUEUE(queue->id)) {
 		mutex_lock(&queue->mutex);
+		queue->locked = true;
 		return 0;
 	}
 
-	err = pmu_mutex_acquire(pmu, queue->mutex_id, &queue->mutex_lock);
+	err = pmu_mutex_acquire(pmu, queue->mutex_id,
+			&queue->mutex_lock);
+	if (err == 0)
+		queue->locked = true;
+
 	return err;
 }
 
@@ -688,11 +683,18 @@ static int pmu_queue_unlock(struct pmu_gk20a *pmu,
 
 	if (PMU_IS_SW_COMMAND_QUEUE(queue->id)) {
 		mutex_unlock(&queue->mutex);
+		queue->locked = false;
 		return 0;
 	}
 
-	err = pmu_mutex_release(pmu, queue->mutex_id, &queue->mutex_lock);
-	return err;
+	if (queue->locked) {
+		err = pmu_mutex_release(pmu, queue->mutex_id,
+				&queue->mutex_lock);
+		if (err == 0)
+			queue->locked = false;
+	}
+
+	return 0;
 }
 
 /* called by pmu_read_message, no lock */
@@ -715,6 +717,8 @@ static bool pmu_queue_has_room(struct pmu_gk20a *pmu,
 {
 	u32 head, tail, free;
 	bool rewind = false;
+
+	BUG_ON(!queue->locked);
 
 	size = ALIGN(size, QUEUE_ALIGNMENT);
 
@@ -1114,8 +1118,6 @@ skip_init:
 	mutex_init(&pmu->elpg_mutex);
 	mutex_init(&pmu->isr_mutex);
 	mutex_init(&pmu->pmu_copy_lock);
-	mutex_init(&pmu->pmu_seq_lock);
-	mutex_init(&pmu->pg_init_mutex);
 
 	pmu->perfmon_counter.index = 3; /* GR & CE2 */
 	pmu->perfmon_counter.group_id = PMU_DOMAIN_GROUP_PSTATE;
@@ -1214,9 +1216,6 @@ int gk20a_init_pmu_setup_hw1(struct gk20a *g)
 	return 0;
 
 }
-
-static int gk20a_aelpg_init(struct gk20a *g);
-static int gk20a_aelpg_init_and_enable(struct gk20a *g, u8 ctrl_id);
 
 int gk20a_init_pmu_setup_hw2(struct gk20a *g)
 {
@@ -1378,8 +1377,11 @@ int gk20a_init_pmu_setup_hw2(struct gk20a *g)
 	 */
 	gk20a_writel(g, 0x10a164, 0x109ff);
 
-	mutex_lock(&pmu->pg_init_mutex);
 	pmu->initialized = true;
+	pmu->zbc_ready = true;
+
+	/* Save zbc table after PMU is initialized. */
+	pmu_save_zbc(g, 0xf);
 
 	/*
 	 * We can't guarantee that gr code to enable ELPG will be
@@ -1388,21 +1390,8 @@ int gk20a_init_pmu_setup_hw2(struct gk20a *g)
 	 */
 	gk20a_pmu_disable_elpg(g);
 
-	pmu->zbc_ready = true;
-	/* Save zbc table after PMU is initialized. */
-	pmu_save_zbc(g, 0xf);
-
 	if (g->elpg_enabled)
 		gk20a_pmu_enable_elpg(g);
-	mutex_unlock(&pmu->pg_init_mutex);
-
-	udelay(50);
-
-	/* Enable AELPG */
-	if (g->aelpg_enabled) {
-		gk20a_aelpg_init(g);
-		gk20a_aelpg_init_and_enable(g, PMU_AP_CTRL_ID_GRAPHICS);
-	}
 
 	return 0;
 
@@ -1606,29 +1595,6 @@ static int pmu_init_perfmon(struct pmu_gk20a *pmu)
 			pwr_pmu_idle_ctrl_value_always_f() |
 			pwr_pmu_idle_ctrl_filter_disabled_f());
 	gk20a_writel(g, pwr_pmu_idle_ctrl_r(6), data);
-
-	/*
-	 * We don't want to disturb counters #3 and #6, which are used by
-	 * perfmon, so we add wiring also to counters #1 and #2 for
-	 * exposing raw counter readings.
-	 */
-	gk20a_writel(g, pwr_pmu_idle_mask_r(1),
-		pwr_pmu_idle_mask_gr_enabled_f() |
-		pwr_pmu_idle_mask_ce_2_enabled_f());
-
-	data = gk20a_readl(g, pwr_pmu_idle_ctrl_r(1));
-	data = set_field(data, pwr_pmu_idle_ctrl_value_m() |
-			pwr_pmu_idle_ctrl_filter_m(),
-			pwr_pmu_idle_ctrl_value_busy_f() |
-			pwr_pmu_idle_ctrl_filter_disabled_f());
-	gk20a_writel(g, pwr_pmu_idle_ctrl_r(1), data);
-
-	data = gk20a_readl(g, pwr_pmu_idle_ctrl_r(2));
-	data = set_field(data, pwr_pmu_idle_ctrl_value_m() |
-			pwr_pmu_idle_ctrl_filter_m(),
-			pwr_pmu_idle_ctrl_value_always_f() |
-			pwr_pmu_idle_ctrl_filter_disabled_f());
-	gk20a_writel(g, pwr_pmu_idle_ctrl_r(2), data);
 
 	pmu->sample_buffer = 0;
 	err = pmu->dmem.alloc(&pmu->dmem, &pmu->sample_buffer, 2 * sizeof(u16));
@@ -1890,7 +1856,7 @@ static void pmu_handle_zbc_msg(struct gk20a *g, struct pmu_msg *msg,
 	pmu->zbc_save_done = 1;
 }
 
-static void pmu_save_zbc(struct gk20a *g, u32 entries)
+void pmu_save_zbc(struct gk20a *g, u32 entries)
 {
 	struct pmu_gk20a *pmu = &g->pmu;
 	struct pmu_cmd cmd;
@@ -1913,12 +1879,6 @@ static void pmu_save_zbc(struct gk20a *g, u32 entries)
 			      &pmu->zbc_save_done, 1);
 	if (!pmu->zbc_save_done)
 		nvhost_err(dev_from_gk20a(g), "ZBC save timeout");
-}
-
-void gk20a_pmu_save_zbc(struct gk20a *g, u32 entries)
-{
-	if (g->pmu.zbc_ready)
-		pmu_save_zbc(g, entries);
 }
 
 static int pmu_perfmon_start_sampling(struct pmu_gk20a *pmu)
@@ -2175,16 +2135,6 @@ static void pmu_dump_falcon_stats(struct pmu_gk20a *pmu)
 {
 	struct gk20a *g = pmu->g;
 	int i;
-
-	nvhost_err(dev_from_gk20a(g), "pmu->initialized=%d, "
-		    "pmu->pmu_ready=%d, pmu->elpg_ready=%d, "
-		    "pmu->perfmon_ready=%d, pmu->elpg_enable_allow=%d, "
-		    "pmu->sw_ready=%d, pmu->elpg_refcnt=%d, "
-		    "pmu->zbc_ready=%d, pmu->elpg_stat=%u",
-		    pmu->initialized, pmu->pmu_ready, pmu->elpg_ready,
-		    pmu->perfmon_ready, pmu->elpg_enable_allow,
-		    pmu->sw_ready, pmu->elpg_refcnt, pmu->zbc_ready,
-		    pmu->elpg_stat);
 
 	nvhost_err(dev_from_gk20a(g), "pwr_falcon_os_r : %d",
 		gk20a_readl(g, pwr_falcon_os_r()));
@@ -2574,7 +2524,7 @@ static int gk20a_pmu_enable_elpg_locked(struct gk20a *g)
 {
 	struct pmu_gk20a *pmu = &g->pmu;
 	struct pmu_cmd cmd;
-	u32 seq, status;
+	u32 seq;
 
 	nvhost_dbg_fn("");
 
@@ -2589,10 +2539,8 @@ static int gk20a_pmu_enable_elpg_locked(struct gk20a *g)
 	   with follow up ELPG disable */
 	pmu->elpg_stat = PMU_ELPG_STAT_ON_PENDING;
 
-	status = gk20a_pmu_cmd_post(g, &cmd, NULL, NULL, PMU_COMMAND_QUEUE_HPQ,
+	gk20a_pmu_cmd_post(g, &cmd, NULL, NULL, PMU_COMMAND_QUEUE_HPQ,
 			pmu_handle_pg_elpg_msg, pmu, &seq, ~0);
-
-	BUG_ON(status != 0);
 
 	nvhost_dbg_fn("done");
 	return 0;
@@ -2607,7 +2555,7 @@ int gk20a_pmu_enable_elpg(struct gk20a *g)
 
 	nvhost_dbg_fn("");
 
-	if (!pmu->elpg_ready || !pmu->initialized)
+	if (!pmu->elpg_ready)
 		goto exit;
 
 	mutex_lock(&pmu->elpg_mutex);
@@ -2680,7 +2628,7 @@ static int gk20a_pmu_disable_elpg_defer_enable(struct gk20a *g, bool enable)
 
 	nvhost_dbg_fn("");
 
-	if (!pmu->elpg_ready || !pmu->initialized)
+	if (!pmu->elpg_ready)
 		return 0;
 
 	/* remove the work from queue */
@@ -2711,8 +2659,7 @@ static int gk20a_pmu_disable_elpg_defer_enable(struct gk20a *g, bool enable)
 
 		if (pmu->elpg_stat != PMU_ELPG_STAT_ON) {
 			nvhost_err(dev_from_gk20a(g),
-				"ELPG_ALLOW_ACK failed, elpg_stat=%d",
-				pmu->elpg_stat);
+				"ELPG_ALLOW_ACK failed");
 			pmu_dump_elpg_stats(pmu);
 			pmu_dump_falcon_stats(pmu);
 			ret = -EBUSY;
@@ -2799,17 +2746,14 @@ int gk20a_pmu_destroy(struct gk20a *g)
 	gk20a_pmu_get_elpg_residency_gating(g, &elpg_ingating_time,
 		&elpg_ungating_time, &gating_cnt);
 
-	mutex_lock(&pmu->pg_init_mutex);
 	gk20a_pmu_disable_elpg_defer_enable(g, false);
-	pmu->initialized = false;
-	mutex_unlock(&pmu->pg_init_mutex);
 
 	/* update the s/w ELPG residency counters */
 	g->pg_ingating_time_us += (u64)elpg_ingating_time;
 	g->pg_ungating_time_us += (u64)elpg_ungating_time;
 	g->pg_gating_cnt += gating_cnt;
 
-	pmu_enable(pmu, false);
+	pmu_enable_hw(pmu, false);
 
 	if (pmu->remove_support) {
 		pmu->remove_support(pmu);
@@ -2836,41 +2780,6 @@ int gk20a_pmu_load_norm(struct gk20a *g, u32 *load)
 	return 0;
 }
 
-void gk20a_pmu_get_load_counters(struct gk20a *g, u32 *busy_cycles,
-				 u32 *total_cycles)
-{
-	struct pmu_gk20a *pmu = &(g->pmu);
-
-	if (!g->power_on) {
-		*busy_cycles = 0;
-		*total_cycles = 0;
-		return;
-	}
-
-	gk20a_busy(g->dev);
-	*busy_cycles = pwr_pmu_idle_count_value_v(
-		gk20a_readl(g, pwr_pmu_idle_count_r(1)));
-	rmb();
-	*total_cycles = pwr_pmu_idle_count_value_v(
-		gk20a_readl(g, pwr_pmu_idle_count_r(2)));
-	gk20a_idle(g->dev);
-}
-
-void gk20a_pmu_reset_load_counters(struct gk20a *g)
-{
-	struct pmu_gk20a *pmu = &(g->pmu);
-	u32 reg_val = pwr_pmu_idle_count_reset_f(1);
-
-	if (!g->power_on)
-		return;
-
-	gk20a_busy(g->dev);
-	gk20a_writel(g, pwr_pmu_idle_count_r(2), reg_val);
-	wmb();
-	gk20a_writel(g, pwr_pmu_idle_count_r(1), reg_val);
-	gk20a_idle(g->dev);
-}
-
 static int gk20a_pmu_get_elpg_residency_gating(struct gk20a *g,
 			u32 *ingating_time, u32 *ungating_time, u32 *gating_cnt)
 {
@@ -2892,150 +2801,6 @@ static int gk20a_pmu_get_elpg_residency_gating(struct gk20a *g,
 	*gating_cnt = stats.pg_gating_cnt;
 
 	return 0;
-}
-
-/* Send an Adaptive Power (AP) related command to PMU */
-static int gk20a_pmu_ap_send_command(struct gk20a *g,
-			union pmu_ap_cmd *p_ap_cmd, bool b_block)
-{
-	struct pmu_gk20a *pmu = &g->pmu;
-	/* FIXME: where is the PG structure defined?? */
-	u32 status = 0;
-	struct pmu_cmd cmd;
-	u32 seq;
-	pmu_callback p_callback = NULL;
-
-	memset(&cmd, 0, sizeof(struct pmu_cmd));
-
-	/* Copy common members */
-	cmd.hdr.unit_id = PMU_UNIT_PG;
-	cmd.hdr.size = PMU_CMD_HDR_SIZE + sizeof(union pmu_ap_cmd);
-
-	cmd.cmd.pg.ap_cmd.cmn.cmd_type = PMU_PG_CMD_ID_AP;
-	cmd.cmd.pg.ap_cmd.cmn.cmd_id = p_ap_cmd->cmn.cmd_id;
-
-	/* Copy other members of command */
-	switch (p_ap_cmd->cmn.cmd_id) {
-	case PMU_AP_CMD_ID_INIT:
-		cmd.cmd.pg.ap_cmd.init.pg_sampling_period_us =
-			p_ap_cmd->init.pg_sampling_period_us;
-		p_callback = ap_callback_init_and_enable_ctrl;
-		break;
-
-	case PMU_AP_CMD_ID_INIT_AND_ENABLE_CTRL:
-		cmd.cmd.pg.ap_cmd.init_and_enable_ctrl.ctrl_id =
-		p_ap_cmd->init_and_enable_ctrl.ctrl_id;
-		memcpy(
-		(void *)&(cmd.cmd.pg.ap_cmd.init_and_enable_ctrl.params),
-			(void *)&(p_ap_cmd->init_and_enable_ctrl.params),
-			sizeof(struct pmu_ap_ctrl_init_params));
-
-		p_callback = ap_callback_init_and_enable_ctrl;
-		break;
-
-	case PMU_AP_CMD_ID_ENABLE_CTRL:
-		cmd.cmd.pg.ap_cmd.enable_ctrl.ctrl_id =
-			p_ap_cmd->enable_ctrl.ctrl_id;
-		break;
-
-	case PMU_AP_CMD_ID_DISABLE_CTRL:
-		cmd.cmd.pg.ap_cmd.disable_ctrl.ctrl_id =
-			p_ap_cmd->disable_ctrl.ctrl_id;
-		break;
-
-	case PMU_AP_CMD_ID_KICK_CTRL:
-		cmd.cmd.pg.ap_cmd.kick_ctrl.ctrl_id =
-			p_ap_cmd->kick_ctrl.ctrl_id;
-		cmd.cmd.pg.ap_cmd.kick_ctrl.skip_count =
-			p_ap_cmd->kick_ctrl.skip_count;
-		break;
-
-	default:
-		nvhost_dbg_pmu("%s: Invalid Adaptive Power command %d\n",
-			__func__, p_ap_cmd->cmn.cmd_id);
-		return 0x2f;
-	}
-
-	status = gk20a_pmu_cmd_post(g, &cmd, NULL, NULL, PMU_COMMAND_QUEUE_HPQ,
-			p_callback, pmu, &seq, ~0);
-
-	if (!status) {
-		nvhost_dbg_pmu(
-			"%s: Unable to submit Adaptive Power Command %d\n",
-			__func__, p_ap_cmd->cmn.cmd_id);
-		goto err_return;
-	}
-
-	/* TODO: Implement blocking calls (b_block) */
-
-err_return:
-	return status;
-}
-
-static void ap_callback_init_and_enable_ctrl(
-		struct gk20a *g, struct pmu_msg *msg,
-		void *param, u32 seq_desc, u32 status)
-{
-	/* Define p_ap (i.e pointer to pmu_ap structure) */
-	WARN_ON(!msg);
-
-	if (!status) {
-		switch (msg->msg.pg.ap_msg.cmn.msg_id) {
-		case PMU_AP_MSG_ID_INIT_ACK:
-			break;
-
-		default:
-			nvhost_dbg_pmu(
-			"%s: Invalid Adaptive Power Message: %x\n",
-			__func__, msg->msg.pg.ap_msg.cmn.msg_id);
-			break;
-		}
-	}
-}
-
-static int gk20a_aelpg_init(struct gk20a *g)
-{
-	int status = 0;
-
-	/* Remove reliance on app_ctrl field. */
-	union pmu_ap_cmd ap_cmd;
-
-	/* TODO: Check for elpg being ready? */
-	ap_cmd.init.cmd_id = PMU_AP_CMD_ID_INIT;
-	ap_cmd.init.pg_sampling_period_us =
-		APCTRL_SAMPLING_PERIOD_PG_DEFAULT_US;
-
-	status = gk20a_pmu_ap_send_command(g, &ap_cmd, false);
-	return status;
-}
-
-static int gk20a_aelpg_init_and_enable(struct gk20a *g, u8 ctrl_id)
-{
-	int status = 0;
-	union pmu_ap_cmd ap_cmd;
-
-	/* TODO: Probably check if ELPG is ready? */
-
-	ap_cmd.init_and_enable_ctrl.cmd_id = PMU_AP_CMD_ID_INIT_AND_ENABLE_CTRL;
-	ap_cmd.init_and_enable_ctrl.ctrl_id = ctrl_id;
-	ap_cmd.init_and_enable_ctrl.params.min_idle_filter_us =
-		APCTRL_MINIMUM_IDLE_FILTER_DEFAULT_US;
-	ap_cmd.init_and_enable_ctrl.params.min_target_saving_us =
-		APCTRL_MINIMUM_TARGET_SAVING_DEFAULT_US;
-	ap_cmd.init_and_enable_ctrl.params.power_break_even_us =
-		APCTRL_POWER_BREAKEVEN_DEFAULT_US;
-	ap_cmd.init_and_enable_ctrl.params.cycles_per_sample_max =
-		APCTRL_CYCLES_PER_SAMPLE_MAX_DEFAULT;
-
-	switch (ctrl_id) {
-	case PMU_AP_CTRL_ID_GRAPHICS:
-		break;
-	default:
-		break;
-	}
-
-	status = gk20a_pmu_ap_send_command(g, &ap_cmd, true);
-	return status;
 }
 
 #if CONFIG_DEBUG_FS
