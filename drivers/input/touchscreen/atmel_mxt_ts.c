@@ -4272,6 +4272,9 @@ static int mxt_suspend(struct device *dev)
 	struct input_dev *input_dev = data->input_dev;
 	char buf[100];
 
+	if (!input_dev)
+ 		return 0;
+
 	if (data->wakeup_gesture_mode) {
 		mutex_lock(&input_dev->mutex);
 		mxt_set_t7_for_gesture(data, true);
@@ -4340,6 +4343,9 @@ static int mxt_resume(struct device *dev)
 	struct i2c_client *client = to_i2c_client(dev);
 	struct mxt_data *data = i2c_get_clientdata(client);
 	struct input_dev *input_dev = data->input_dev;
+
+	if (!input_dev)
+ 		return 0;
 
 	if (data->wakeup_gesture_mode) {
 		mutex_lock(&input_dev->mutex);
