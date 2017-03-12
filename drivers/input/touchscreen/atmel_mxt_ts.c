@@ -28,6 +28,7 @@
 #include <linux/gpio.h>
 #include <linux/string.h>
 #include <linux/wait.h>
+#include <linux/fb.h>
 
 /* Version */
 #define MXT_VER_20		20
@@ -466,6 +467,9 @@
 #define MXT_MAX_FINGER_NUM	10
 #define BOOTLOADER_1664_1188	1
 
+static struct notifier_block fb_notif;
+bool screen_is_off;
+
 struct mxt_info {
 	u8 family_id;
 	u8 variant_id;
@@ -572,7 +576,6 @@ struct mxt_data {
 	bool is_hid_protocol;
 	u8 read_buf[64];
 	u8 wakeup_gesture_mode;
-	bool is_in_deep_sleep;
 
 	/* Slowscan parameters	*/
 	int slowscan_enabled;
@@ -648,6 +651,32 @@ static const struct mxt_i2c_address_pair mxt_i2c_addresses[] = {
 	{ 0x35, 0x5b },
 #endif
 };
+
+static int fb_notifier_callback(struct notifier_block *this,
+ 				 unsigned long event, void *data)
+{
+	struct fb_event *evdata = data;
+ 	int *blank;
+ 
+ 	if (evdata && evdata->data && event == FB_EVENT_BLANK) {
+ 		blank = evdata->data;
+ 		switch (*blank) {
+ 			case FB_BLANK_UNBLANK:
+ 				//display on
+                                screen_is_off = false;
+ 				break;
+ 			case FB_BLANK_POWERDOWN:
+ 			case FB_BLANK_HSYNC_SUSPEND:
+ 			case FB_BLANK_VSYNC_SUSPEND:
+ 			case FB_BLANK_NORMAL:
+ 				//display off
+                                screen_is_off = true;
+ 				break;
+ 		}
+        }
+
+	return NOTIFY_OK;
+}
 
 static int mxt_bootloader_read(struct mxt_data *data, u8 *val, unsigned int count)
 {
@@ -1724,7 +1753,7 @@ static void mxt_proc_t93_message(struct mxt_data *data, u8 *msg)
 
 	dev_info(dev, "t93 double click gesture triggerred !\n");
 
-	if (data->is_stopped) {
+	if (screen_is_off) {
 		dev_info(dev, "wakeup OK, do something!\n");
 		input_event(input_dev, EV_KEY, KEY_POWER, 1);
 		input_sync(input_dev);
@@ -1936,11 +1965,6 @@ static irqreturn_t mxt_interrupt(int irq, void *dev_id)
 	u8 recv_buf[64];
 	int ret;
 	int i;
-
-	while (data->is_in_deep_sleep) {
-		pr_info("Wait for device wake up, i2c not ready!\n");
-		msleep(10);
-	}
 
 	if (data->is_hid_protocol) {
 		ret = i2c_master_recv(data->client, recv_buf, (int)data->max_read_length);
@@ -4824,11 +4848,9 @@ static int mxt_ts_suspend(struct device *dev)
 {
 	struct mxt_data *data =  dev_get_drvdata(dev);
 
-	if (device_may_wakeup(dev) &&
-			data->wakeup_gesture_mode) {
-		dev_info(dev, "touch enable irq wake\n");
+	if (device_may_wakeup(dev) && data->wakeup_gesture_mode) {
+		dev_err(dev, "touch enable irq wake\n");
 		enable_irq_wake(data->client->irq);
-		data->is_in_deep_sleep = true;
 	}
 
 	return 0;
@@ -4838,11 +4860,9 @@ static int mxt_ts_resume(struct device *dev)
 {
 	struct mxt_data *data =  dev_get_drvdata(dev);
 
-	if (device_may_wakeup(dev) &&
-			data->wakeup_gesture_mode) {
-		dev_info(dev, "touch disable irq wake\n");
+	if (device_may_wakeup(dev) && data->wakeup_gesture_mode) {
+		dev_err(dev, "touch disable irq wake\n");
 		disable_irq_wake(data->client->irq);
-		data->is_in_deep_sleep = false;
 	}
 
 	return 0;
@@ -4851,7 +4871,7 @@ static int mxt_ts_resume(struct device *dev)
 static struct dev_pm_ops mxt_touchscreen_pm_ops = {
 #ifndef CONFIG_HAS_EARLYSUSPEND
 	.suspend	= mxt_ts_suspend,
-	.resume	 = mxt_ts_resume,
+	.resume	        = mxt_ts_resume,
 #endif
 };
 #endif
@@ -4880,11 +4900,16 @@ static struct i2c_driver mxt_driver = {
 
 static int __init mxt_init(void)
 {
+        fb_notif.notifier_call = fb_notifier_callback;
+ 	if (fb_register_client(&fb_notif) != 0)
+ 		pr_err("%s: Failed to register fb callback\n", __func__);
+
 	return i2c_add_driver(&mxt_driver);
 }
 
 static void __exit mxt_exit(void)
 {
+        fb_unregister_client(&fb_notif);
 	i2c_del_driver(&mxt_driver);
 }
 
