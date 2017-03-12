@@ -1138,11 +1138,11 @@ DECLARE_BUILTIN_FIRMWARE_SIZE(MXT1066T_LENS_CONFIG, \
 						sizeof(mXT1066T_lens_config)-1);
 
 static int mxt_lens_1664t_key_codes[MXT_KEYARRAY_MAX_KEYS] = {
-	KEY_BACK, KEY_HOME, KEY_MENU,
+	KEY_BACK, KEY_HOME, KEY_MENU, KEY_POWER,
 };
 
 static int mxt_lens_1066t_key_codes[MXT_KEYARRAY_MAX_KEYS] = {
-	KEY_MENU, KEY_HOME, KEY_BACK,
+	KEY_MENU, KEY_HOME, KEY_BACK, KEY_POWER,
 };
 
 static struct mxt_config_info mxt_config_array[] = {
@@ -1156,7 +1156,7 @@ static struct mxt_config_info mxt_config_array[] = {
 		.mxt_cfg_name	= MXT1664T_LENS_CONFIG_NO_DUMMY,
 		.vendor_id	= 0x4,
 		.key_codes		= mxt_lens_1664t_key_codes,
-		.key_num		= 3,
+		.key_num		= 4,
 		.mxt_fw_name		= MXT1664T_FIRMWARE,
 	},
 	{
@@ -1169,7 +1169,7 @@ static struct mxt_config_info mxt_config_array[] = {
 		.mxt_cfg_name	= MXT1664T_LENS_CONFIG_WITH_DUMMY,
 		.vendor_id	= 0x4,
 		.key_codes		= mxt_lens_1664t_key_codes,
-		.key_num		= 3,
+		.key_num		= 4,
 		.mxt_fw_name		= MXT1664T_FIRMWARE,
 	},
 	{
@@ -1182,7 +1182,7 @@ static struct mxt_config_info mxt_config_array[] = {
 		.mxt_cfg_name	= MXT1066T_LENS_CONFIG,
 		.vendor_id	= 0x4,
 		.key_codes		= mxt_lens_1066t_key_codes,
-		.key_num		= 3,
+		.key_num		= 4,
 		.mxt_fw_name		= MXT1066T_FIRMWARE,
 	},
 };
