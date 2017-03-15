@@ -468,7 +468,7 @@
 #define BOOTLOADER_1664_1188	1
 
 static struct notifier_block fb_notif;
-bool screen_is_off;
+static bool screen_is_off;
 
 struct mxt_info {
 	u8 family_id;
