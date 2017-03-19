@@ -38,8 +38,7 @@ struct nvhost_hwctx;
 struct nvhost_channel_ops {
 	const char *soc_name;
 	int (*init)(struct nvhost_channel *,
-		    struct nvhost_master *,
-		    int chid);
+		    struct nvhost_master *);
 	int (*submit)(struct nvhost_job *job);
 	int (*save_context)(struct nvhost_channel *channel);
 	int (*init_gather_filter)(struct nvhost_channel *ch);
@@ -54,9 +53,7 @@ struct nvhost_channel {
 	struct mutex submitlock;
 	void __iomem *aperture;
 	struct nvhost_hwctx *cur_ctx;
-	struct device *node;
 	struct platform_device *dev;
-	struct cdev cdev;
 	struct nvhost_hwctx_handler *ctxhandler;
 	struct nvhost_cdma cdma;
 
@@ -71,7 +68,7 @@ struct nvhost_channel {
 #define channel_op(ch)		(ch->ops)
 
 int nvhost_channel_init(struct nvhost_channel *ch,
-	struct nvhost_master *dev, int index);
+	struct nvhost_master *dev);
 
 int nvhost_channel_submit(struct nvhost_job *job);
 

@@ -29,6 +29,7 @@
 #include <linux/firmware.h>
 #include <linux/dma-mapping.h>
 #include <linux/tegra-soc.h>
+#include <linux/anon_inodes.h>
 
 #include <trace/events/nvhost.h>
 
@@ -198,13 +199,19 @@ static int nvhost_channelrelease(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-static int nvhost_channelopen(struct inode *inode, struct file *filp)
+static int __nvhost_channelopen(struct inode *inode,
+		struct nvhost_channel *ch,
+		struct file *filp)
 {
 	struct nvhost_channel_userctx *priv;
-	struct nvhost_channel *ch;
 	struct nvhost_device_data *pdata;
 
-	ch = container_of(inode->i_cdev, struct nvhost_channel, cdev);
+	if (inode) {
+		pdata = container_of(inode->i_cdev,
+				struct nvhost_device_data, cdev);
+		ch = pdata->channel;
+	}
+
 	ch = nvhost_getchannel(ch, false, true);
 	if (!ch)
 		return -ENOMEM;
@@ -239,6 +246,11 @@ static int nvhost_channelopen(struct inode *inode, struct file *filp)
 fail:
 	nvhost_channelrelease(inode, filp);
 	return -ENOMEM;
+}
+
+static int nvhost_channelopen(struct inode *inode, struct file *filp)
+{
+	return __nvhost_channelopen(inode, NULL, filp);
 }
 
 static int nvhost_ioctl_channel_submit(struct nvhost_channel_userctx *ctx,
@@ -736,6 +748,44 @@ static long nvhost_channelctl(struct file *filp,
 	}
 
 	switch (cmd) {
+	case NVHOST_IOCTL_CHANNEL_OPEN:
+	{
+		int fd;
+		struct file *file;
+		char *name;
+
+		err = get_unused_fd_flags(O_RDWR);
+		if (err < 0)
+			break;
+		fd = err;
+
+		name = kasprintf(GFP_KERNEL, "nvhost-%s-fd%d",
+				dev_name(dev), fd);
+		if (!name) {
+			err = -ENOMEM;
+			put_unused_fd(fd);
+			break;
+		}
+
+		file = anon_inode_getfile(name, filp->f_op, NULL, O_RDWR);
+		kfree(name);
+		if (IS_ERR(file)) {
+			err = PTR_ERR(file);
+			put_unused_fd(fd);
+			break;
+		}
+		fd_install(fd, file);
+
+		err = __nvhost_channelopen(NULL, priv->ch, file);
+		if (err) {
+			put_unused_fd(fd);
+			fput(file);
+			break;
+		}
+
+		((struct nvhost_get_param_args *)buf)->value = fd;
+		break;
+	}
 	case NVHOST_IOCTL_CHANNEL_GET_SYNCPOINTS:
 	{
 		struct nvhost_device_data *pdata = \
@@ -1043,7 +1093,7 @@ static struct device *nvhost_client_device_create(
 	err = cdev_add(cdev, devno, 1);
 	if (err < 0) {
 		dev_err(&pdev->dev,
-			"failed to add chan %i cdev\n", pdata->index);
+			"failed to add cdev\n");
 		return NULL;
 	}
 	use_dev_name = get_device_name_for_dev(pdev);
@@ -1084,15 +1134,16 @@ int nvhost_client_user_init(struct platform_device *dev)
 
 	/* gk20a creates the channel node by itself */
 	if (pdata->class != NV_GRAPHICS_GPU_CLASS_ID) {
-		ch->node = nvhost_client_device_create(dev, &ch->cdev,
+		pdata->node = nvhost_client_device_create(dev, &pdata->cdev,
 					"", devno, &nvhost_channelops);
-		if (ch->node == NULL)
+		if (pdata->node == NULL)
 			goto fail;
 	}
 
 	if (pdata->as_ops) {
 		++devno;
-		ch->as_node = nvhost_client_device_create(dev, &ch->as_cdev,
+		ch->as_node = nvhost_client_device_create(dev,
+					&ch->as_cdev,
 					"as-", devno, &nvhost_asops);
 		if (ch->as_node == NULL)
 			goto fail;
@@ -1143,9 +1194,9 @@ void nvhost_client_user_deinit(struct platform_device *dev)
 
 	BUG_ON(!ch);
 
-	if (ch->node) {
-		device_destroy(nvhost_master->nvhost_class, ch->cdev.dev);
-		cdev_del(&ch->cdev);
+	if (pdata->node) {
+		device_destroy(nvhost_master->nvhost_class, pdata->cdev.dev);
+		cdev_del(&pdata->cdev);
 	}
 
 	if (ch->as_node) {
@@ -1189,7 +1240,7 @@ int nvhost_client_device_init(struct platform_device *dev)
 	/* Create debugfs directory for the device */
 	nvhost_device_debug_init(dev);
 
-	err = nvhost_channel_init(ch, nvhost_master, pdata->index);
+	err = nvhost_channel_init(ch, nvhost_master);
 	if (err)
 		goto fail1;
 

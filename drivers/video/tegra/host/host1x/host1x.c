@@ -4,7 +4,6 @@
  * Tegra Graphics Host Driver Entrypoint
  *
  * Copyright (c) 2010-2014, NVIDIA Corporation. All rights reserved.
- * Copyright (C) 2016 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -511,7 +510,6 @@ static inline int nvhost_set_sysfs_capability_node(
 				struct nvhost_capability_node *node,
 				int (*func)(struct nvhost_syncpt *sp))
 {
-	sysfs_attr_init(&node->attr.attr);
 	node->attr.attr.name = name;
 	node->attr.attr.mode = S_IRUGO;
 	node->attr.show = nvhost_syncpt_capability_show;
@@ -780,18 +778,21 @@ static int nvhost_probe(struct platform_device *dev)
 #ifdef CONFIG_PM_GENERIC_DOMAINS
 	pdata->pd.name = "tegra-host1x";
 	err = nvhost_module_add_domain(&pdata->pd, dev);
-#endif
 
-	mutex_init(&host->timeout_mutex);
+#endif
 
 	nvhost_module_busy(dev);
 
 	nvhost_syncpt_reset(&host->syncpt);
-	nvhost_intr_start(&host->intr, clk_get_rate(pdata->clk[0]));
+	if (tegra_cpu_is_asim())
+		/* for simulation, use a fake clock rate */
+		nvhost_intr_start(&host->intr, 12000000);
+	else
+		nvhost_intr_start(&host->intr, clk_get_rate(pdata->clk[0]));
 
 	nvhost_device_list_init();
-	pdata->nvhost_timeout_default =
-			CONFIG_TEGRA_GRHOST_DEFAULT_TIMEOUT;
+	pdata->nvhost_timeout_default = tegra_platform_is_linsim() ?
+			0 : CONFIG_TEGRA_GRHOST_DEFAULT_TIMEOUT;
 	nvhost_debug_init(host);
 
 	nvhost_module_idle(dev);
@@ -823,30 +824,6 @@ static int __exit nvhost_remove(struct platform_device *dev)
 }
 
 #ifdef CONFIG_PM
-
-/*
- * FIXME: Genpd disables the runtime pm while preparing for system
- * suspend. As host1x clients may need host1x in suspend sequence
- * for register reads/writes or syncpoint increments, we need to
- * re-enable pm_runtime. As we *must* balance pm_runtime counter,
- * we drop the reference in suspend complete callback, right before
- * the genpd re-enables runtime pm.
- *
- * We should revisit the power code as this is hacky and
- * caused by the way we use power domains.
- */
-
-static int nvhost_suspend_prepare(struct device *dev)
-{
-	pm_runtime_enable(dev);
-	return 0;
-}
-
-static void nvhost_suspend_complete(struct device *dev)
-{
-	__pm_runtime_disable(dev, false);
-}
-
 static int nvhost_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
@@ -876,10 +853,8 @@ static int nvhost_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops host1x_pm_ops = {
-	.prepare = nvhost_suspend_prepare,
-	.complete = nvhost_suspend_complete,
-	.suspend_late = nvhost_suspend,
-	.resume_early = nvhost_resume,
+	.suspend = nvhost_suspend,
+	.resume = nvhost_resume,
 };
 #endif /* CONFIG_PM */
 
