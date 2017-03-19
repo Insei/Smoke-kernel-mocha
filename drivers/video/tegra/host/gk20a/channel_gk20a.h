@@ -157,7 +157,6 @@ struct nvhost_cycle_stats_args;
 struct nvhost_set_priority_args;
 
 void gk20a_channel_update(struct channel_gk20a *c);
-
 int gk20a_init_channel_support(struct gk20a *, u32 chid);
 int gk20a_channel_init(struct nvhost_channel *ch, struct nvhost_master *host,
 		       int index);
