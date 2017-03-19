@@ -4,7 +4,6 @@
  * Tegra Graphics Host Syncpoint Integration to linux/sync Framework
  *
  * Copyright (c) 2013, NVIDIA Corporation. All rights reserved.
- * Copyright (C) 2016 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -217,13 +216,7 @@ static void nvhost_sync_pt_value_str(struct sync_pt *sync_pt, char *str,
 		int size)
 {
 	struct nvhost_sync_pt *pt = to_nvhost_sync_pt(sync_pt);
-	struct nvhost_sync_timeline *obj;
-
-	/* shared data may not be available yet */
-	if (!pt)
-		return;
-
-	obj = pt->obj;
+	struct nvhost_sync_timeline *obj = pt->obj;
 
 	if (obj->id != NVSYNCPT_INVALID)
 		snprintf(str, size, "%d", pt->thresh);
