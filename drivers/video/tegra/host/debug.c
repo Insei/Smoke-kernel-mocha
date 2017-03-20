@@ -91,7 +91,6 @@ static int show_channels_no_fifo(struct platform_device *pdev, void *data,
 	return show_channels(pdev, data, locked_id, false);
 }
 
-
 static void show_syncpts(struct nvhost_master *m, struct output *o)
 {
 	int i;

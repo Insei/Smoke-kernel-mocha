@@ -303,8 +303,7 @@ static int nvhost_ioctl_channel_submit(struct nvhost_channel_userctx *ctx,
 			num_cmdbufs,
 			num_relocs,
 			num_waitchks,
-			num_syncpt_incrs,
-			ctx->memmgr);
+			num_syncpt_incrs);
 	if (!job)
 		return -ENOMEM;
 
@@ -339,8 +338,10 @@ static int nvhost_ioctl_channel_submit(struct nvhost_channel_userctx *ctx,
 		if (err)
 			goto fail;
 
-		err = copy_from_user(&cmdbuf_ext,
-				cmdbuf_exts + i, sizeof(cmdbuf_ext));
+		cmdbuf_ext.pre_fence = -1;
+		if (cmdbuf_exts)
+			err = copy_from_user(&cmdbuf_ext,
+					cmdbuf_exts + i, sizeof(cmdbuf_ext));
 		if (err)
 			cmdbuf_ext.pre_fence = -1;
 
@@ -800,7 +801,7 @@ static long nvhost_channelctl(struct file *filp,
 			break;
 		}
 
-		((struct nvhost_get_param_args *)buf)->value = fd;
+		((struct nvhost_channel_open_args *)buf)->channel_fd = fd;
 		break;
 	}
 	case NVHOST_IOCTL_CHANNEL_GET_SYNCPOINTS:
