@@ -1613,6 +1613,7 @@ static const char * const cpu_groups[] = {
 static const char * const dap_groups[] = {
 	"dap_mclk1_pee2",
 	"clk2_req_pcc5",
+	"dap_mclk1_req_pee2",
 };
 
 static const char * const dap1_groups[] = {
