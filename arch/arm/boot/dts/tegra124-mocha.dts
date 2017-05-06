@@ -5,9 +5,13 @@
 #include "tegra124-platforms/tegra124-tn8-emc-e1922-1100-a00.dtsi"
 #include "tegra124-platforms/tegra124-tn8-pmic-e1736-1000-a00.dtsi"
 #include "tegra124-platforms/tegra124-tn8-fixed-e1736-1000-a00.dtsi"
-#include "tegra124-platforms/tegra124-tn8-gpio-e1780-1100-a02.dtsi"
-#include "tegra124-platforms/tegra124-tn8-pinmux-e1780-1100-a02.dtsi"
-#include "tegra124-platforms/tegra124-tn8-keys-e1780-1100-a02.dtsi"
+
+/* this is static dtsi files */
+#include "tegra124-platforms/tegra124-mocha-gpio-e1780.dtsi"
+#include "tegra124-platforms/tegra124-mocha-keys-e1780.dtsi"
+#include "tegra124-platforms/tegra124-mocha-pinmux-e1780.dtsi"
+/* end of static dtsi files */
+
 #include "tegra124-platforms/tegra124-mocha-sysedp.dtsi"
 
 / {
