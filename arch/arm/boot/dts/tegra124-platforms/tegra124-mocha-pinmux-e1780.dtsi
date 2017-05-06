@@ -609,7 +609,7 @@
 
 			pi7 {
 				nvidia,pins = "pi7";
-				nvidia,function = "RSVD1";
+				nvidia,function = "rsvd1";
 				nvidia,enable-input = <TEGRA_PIN_INPUT>;
 				nvidia,pull = <TEGRA_PIN_PUPD_PULL_UP>;
 				nvidia,tristate = <TEGRA_PIN_NORMAL>;
@@ -738,7 +738,7 @@
 
 			ph3 {
 				nvidia,pins = "ph3";
-				nvidia,function = "rsvd3";
+				nvidia,function = "gmi";
 				nvidia,enable-input = <TEGRA_PIN_OUTPUT>;
 				nvidia,pull = <TEGRA_PIN_PUPD_PULL_UP>;
 				nvidia,tristate = <TEGRA_PIN_NORMAL>;
@@ -1004,7 +1004,7 @@
 		pinmux_unused_lowpower: unused_lowpower {
 			dap_mclk1_req_pee2 {
 				nvidia,pins = "dap_mclk1_req_pee2";
-				nvidia,function = "DAP";
+				nvidia,function = "dap";
 				nvidia,enable-input = <TEGRA_PIN_OUTPUT>;
 				nvidia,pull = <TEGRA_PIN_PUPD_PULL_DOWN>;
 				nvidia,tristate = <TEGRA_PIN_TRISTATE>;
