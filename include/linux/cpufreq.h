@@ -219,7 +219,6 @@ extern int __cpufreq_driver_getavg(struct cpufreq_policy *policy,
 
 int cpufreq_register_governor(struct cpufreq_governor *governor);
 void cpufreq_unregister_governor(struct cpufreq_governor *governor);
-int __cpufreq_driver_getavg(struct cpufreq_policy *policy, unsigned int cpu);
 
 
 /*********************************************************************
