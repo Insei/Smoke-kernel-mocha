@@ -94,6 +94,12 @@ struct clk_tegra;
 #define to_clk_tegra(_hw) container_of(_hw, struct clk_tegra, hw)
 #endif
 
+#define LOW_POWER_PROFILE    1
+#define MIDDLE_POWER_PROFILE 2
+#define HIGH_POWER_PROFILE   3
+
+extern int cur_profile;
+
 struct clk_mux_sel {
 	struct clk	*input;
 	u32		value;
