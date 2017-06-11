@@ -8839,9 +8839,9 @@ unsigned long tegra_emc_to_cpu_ratio(unsigned long cpu_rate)
 {
         switch (cur_profile) {
                 case LOW_POWER_PROFILE: {
-                        if (cpu_rate >= 1044000)
+                        if (cpu_rate >= 1428000)
                                 return 528000000;
-                        if (cpu_rate >= 696000)
+                        if (cpu_rate >= 1044000)
                                 return 396000000;
                         if (cpu_rate >= 204000)
                                 return 204000000;
@@ -8851,12 +8851,8 @@ unsigned long tegra_emc_to_cpu_ratio(unsigned long cpu_rate)
                         if (cpu_rate >= 1326000)
                                 return 924000000;
                         if (cpu_rate >= 1044000)
-                                return 600000000;
-                        if (cpu_rate >= 828000)
-                                return 528000000;
+                                return 40800000;
                         if (cpu_rate >= 696000)
-                                return 396000000;
-                        if (cpu_rate >= 204000)
                                 return 204000000;
                         break;
                 }
