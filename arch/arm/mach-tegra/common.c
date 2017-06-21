@@ -2597,9 +2597,13 @@ static int panic_prep_restart(struct notifier_block *this,
 {
 	in_panic = 1;
 	printk(KERN_INFO "Stack trace dump:\n");
+#ifdef CONFIG_WATCHDOG
 	watchdog_disable();
+#endif
 	show_state_filter(0);
+#ifdef CONFIG_WATCHDOG
 	watchdog_enable();
+#endif
 
 	return NOTIFY_DONE;
 }
